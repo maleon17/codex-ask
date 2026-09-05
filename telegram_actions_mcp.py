@@ -120,6 +120,17 @@ def create_group(title: str, members: list[str] | None = None) -> str:
 
 
 @mcp.tool()
+def create_channel(title: str, members: list[str] | None = None) -> str:
+    """Создать новый broadcast-канал в Telegram (не группу) и сразу добавить
+    в него людей (по id/@username из resolve_person, или точному имени/username
+    если он однозначен). members можно оставить пустым -- тогда просто создаст
+    пустой канал. Возвращает РЕАЛЬНЫЙ результат (кто добавлен, кого не нашли,
+    у кого приватность не позволила) -- отвечай пользователю по этому
+    результату, а не заранее."""
+    return _call_tool("create_channel", {"title": title, "members": members or []})
+
+
+@mcp.tool()
 def invite_to_group(members: list[str], group: str = "") -> str:
     """Добавить людей в УЖЕ существующую группу. group -- точное название
     существующей группы или её id; пусто = ТЕКУЩИЙ чат, из которого задали

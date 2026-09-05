@@ -1662,6 +1662,21 @@ class CodexAsk(loader.Module):
         await self._notify_topic("moderation", f"👥 <b>{_h(title)}</b>:\n" + "\n".join(lines))
         return "\n".join(lines)
 
+    async def _create_channel_action(self, title, members):
+        """Создаёт broadcast-канал и возвращает результат добавления участников."""
+        title = (title or "").strip()
+        if not title:
+            return "Не указано название канала."
+        try:
+            peer, is_new = await utils.asset_channel(self._client, title, "", channel=True)
+        except Exception as e:
+            return f"Не смог создать канал: {_h(str(e))}"
+        lines = [f"✅ Канал «{_h(title)}» {'создан' if is_new else 'уже был, использую его'}."]
+        if members:
+            lines += await self._add_members(peer, title, members)
+        await self._notify_topic("moderation", f"📢 <b>{_h(title)}</b>:\n" + "\n".join(lines))
+        return "\n".join(lines)
+
     async def _get_invite_link_action(self, group_arg, chat_id):
         """Real get_invite_link MCP tool handler. Standalone way to hand
         back a real invite link (e.g. to show the owner directly, or to
@@ -3243,6 +3258,8 @@ class CodexAsk(loader.Module):
                 result = await self._resolve_person(args.get("query", ""))
             elif tool == "create_group":
                 result = await self._create_group_action(args.get("title", ""), args.get("members") or [])
+            elif tool == "create_channel":
+                result = await self._create_channel_action(args.get("title", ""), args.get("members") or [])
             elif tool == "invite_to_group":
                 result = await self._invite_to_group_action(
                     args.get("group", ""), args.get("members") or [], chat_id,
