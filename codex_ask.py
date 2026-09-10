@@ -1856,12 +1856,35 @@ class CodexAsk(loader.Module):
     def _find_trigger_in_chat(self, trig_id, chat_id):
         """Look up a trigger only in one already-resolved chat.
 
-        This is intentionally separate from _find_trigger_by_id(): confirm
-        card callbacks need the latter's cross-chat recovery, while mutating
-        tool calls must never use a trigger id as a global capability.
+        Intentionally separate from _find_trigger_by_id(): confirm-card
+        callbacks and edit/remove_trigger for NON-owner requesters (trigger-
+        spawned turns, public callers) must never use a trigger id as a
+        global capability -- they stay scoped to one chat. The owner's own
+        edit/remove requests are allowed a cross-chat fallback via
+        _owner_trigger_chat_key(), see _edit_trigger_action/_remove_trigger_action.
         """
         trigs = self._get_triggers().get(str(chat_id), [])
         return next((t for t in trigs if t.get("id") == trig_id), None)
+
+    async def _is_owner_requester(self, requester_id):
+        """True only for the userbot owner's own tool requests (incl. the
+        owner-scoped bridge session that presents REQUESTER_ID=owner_id).
+        Trigger-spawned requesters and public callers are never owner."""
+        if requester_id is None or self._is_trigger_requester(requester_id):
+            return False
+        try:
+            owner_id = await self._get_owner_id()
+        except Exception:
+            return False
+        return owner_id is not None and str(requester_id).strip() == str(owner_id)
+
+    def _owner_trigger_chat_key(self, trig_id):
+        """Which stored chat-key holds this trigger id, searched across every
+        chat. Only ever called after _is_owner_requester() has passed."""
+        for cid, trigs in self._get_triggers().items():
+            if any(t.get("id") == trig_id for t in trigs):
+                return cid
+        return None
 
     async def _resolve_any_chat_target(self, target, chat_id):
         """Like _resolve_group_target/_resolve_send_target but across ANY
@@ -2158,7 +2181,7 @@ class CodexAsk(loader.Module):
         err_note = f"\n⚠️ Пропущено: {'; '.join(errors)}" if errors else ""
         return f"✅ Зарегистрировано в «{chat_label}»:\n" + "\n".join(lines) + err_note
 
-    async def _edit_trigger_action(self, trig_id, updates, chat_arg, chat_id):
+    async def _edit_trigger_action(self, trig_id, updates, chat_arg, chat_id, requester_id=None):
         """Real edit_trigger MCP tool handler. Patches an existing trigger
         (found by id within the requested chat) in place instead of the
         remove_trigger+register_trigger churn -- that round trip loses the
@@ -2192,10 +2215,17 @@ class CodexAsk(loader.Module):
             return f"Не нашёл чат «{chat_arg}» для триггера."
         chat_key = str(chat_target)
         triggers = self._get_triggers()
-        trigs = triggers.get(chat_key, [])
         t = self._find_trigger_in_chat(trig_id, chat_target)
+        if t is None and await self._is_owner_requester(requester_id):
+            alt_key = self._owner_trigger_chat_key(trig_id)
+            if alt_key is not None:
+                chat_key = alt_key
+                t = next(
+                    (c for c in triggers.get(chat_key, []) if c.get("id") == trig_id), None
+                )
         if t is None:
-            return f"триггер с этим id не найден в этом чате: {trig_id}"
+            return f"триггер с этим id не найден: {trig_id}"
+        trigs = triggers.get(chat_key, [])
         i = next(i for i, candidate in enumerate(trigs) if candidate.get("id") == trig_id)
         merged_spec = {**t, **updates}
         new_trig, err = self._build_trigger(merged_spec)
@@ -2288,18 +2318,28 @@ class CodexAsk(loader.Module):
             lines.append(line)
         return "Активные триггеры:\n" + "\n".join(lines)
 
-    async def _remove_trigger_action(self, trig_id, chat_arg, chat_id):
+    async def _remove_trigger_action(self, trig_id, chat_arg, chat_id, requester_id=None):
         """Real remove_trigger MCP tool handler (was the REMOVE_TRIGGER
-        text marker). The trigger id is looked up only in the requested
-        chat; an id from another chat is not a permission to remove it."""
+        text marker). For non-owner requesters the id is looked up only in
+        the requested chat -- an id from another chat is not a permission to
+        remove it. The OWNER's own request falls back to a cross-chat id
+        lookup when the id isn't in the resolved chat, so "снеси триггер X"
+        works without having to name the chat X lives in."""
         chat_target = await self._resolve_any_chat_target(chat_arg, chat_id)
         if chat_target is None:
             return f"Не нашёл чат «{chat_arg}» для триггера."
         chat_key = str(chat_target)
         triggers = self._get_triggers()
         found = self._find_trigger_in_chat(trig_id, chat_target)
+        if found is None and await self._is_owner_requester(requester_id):
+            alt_key = self._owner_trigger_chat_key(trig_id)
+            if alt_key is not None:
+                chat_key = alt_key
+                found = next(
+                    (t for t in triggers.get(chat_key, []) if t.get("id") == trig_id), None
+                )
         if found is None:
-            return f"триггер с этим id не найден в этом чате: {trig_id}"
+            return f"триггер с этим id не найден: {trig_id}"
         triggers[chat_key] = [t for t in triggers.get(chat_key, []) if t.get("id") != trig_id]
         if not triggers[chat_key]:
             del triggers[chat_key]
@@ -3286,11 +3326,12 @@ class CodexAsk(loader.Module):
                 )
             elif tool == "remove_trigger":
                 result = await self._remove_trigger_action(
-                    args.get("trigger_id", ""), args.get("chat", ""), chat_id,
+                    args.get("trigger_id", ""), args.get("chat", ""), chat_id, requester_id,
                 )
             elif tool == "edit_trigger":
                 result = await self._edit_trigger_action(
                     args.get("trigger_id", ""), args.get("updates") or {}, args.get("chat", ""), chat_id,
+                    requester_id,
                 )
             elif tool == "list_triggers":
                 result = await self._list_triggers(args.get("chat", ""), chat_id)

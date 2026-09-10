@@ -337,14 +337,17 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
 
 
 @mcp.tool()
-def remove_trigger(trigger_id: str) -> str:
+def remove_trigger(trigger_id: str, chat: str = "") -> str:
     """Удалить ранее зарегистрированный триггер по его id (см.
-    list_triggers)."""
-    return _call_tool("remove_trigger", {"trigger_id": trigger_id})
+    list_triggers). chat -- пусто/'this' = текущий чат; можно указать
+    конкретный чат (id/@username/точное название), где живёт триггер.
+    Для ВЛАДЕЛЬЦА пустой chat дополнительно означает "найти этот id в
+    любом чате" -- называть чат не обязательно."""
+    return _call_tool("remove_trigger", {"trigger_id": trigger_id, "chat": chat})
 
 
 @mcp.tool()
-def edit_trigger(trigger_id: str, updates: dict) -> str:
+def edit_trigger(trigger_id: str, updates: dict, chat: str = "") -> str:
     """Изменить ранее зарегистрированный триггер БЕЗ remove_trigger+
     register_trigger -- используй это по умолчанию для любой правки
     существующего триггера (поменять слово в value, включить/выключить
@@ -356,10 +359,12 @@ def edit_trigger(trigger_id: str, updates: dict) -> str:
     остальное остаётся как было. Явный null у поля ЧИСТИТ его (например
     {"verify": null} снимет verify-условие). id/чат триггера и (для
     action=agent) origin_chat_id/origin_msg_id сохраняются как есть.
+    chat -- пусто/'this' = текущий чат, либо конкретный чат, где живёт
+    триггер; для ВЛАДЕЛЬЦА пустой chat = "найти id в любом чате".
     Осторожно: если меняешь value, но не даёшь новый label -- старый
     label не пересчитывается автоматически, задай его явно, если он
     перестал описывать новое условие."""
-    return _call_tool("edit_trigger", {"trigger_id": trigger_id, "updates": updates})
+    return _call_tool("edit_trigger", {"trigger_id": trigger_id, "updates": updates, "chat": chat})
 
 
 @mcp.tool()
