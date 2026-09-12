@@ -62,7 +62,7 @@ CODEX_EFFORT = os.environ.get("CODEX_JARVIS_EFFORT", "low")
 # for the "verify" trigger gate -- there's no Haiku equivalent on the Codex
 # side, so this is the cheap/fast tier for CodexAsk's own triggers instead).
 # Stateless, no persona, no MCP tools needed -- see CLASSIFY_PROMPT below.
-CODEX_CLASSIFY_MODEL = os.environ.get("CODEX_JARVIS_CLASSIFY_MODEL", "gpt-5.4")
+CODEX_CLASSIFY_MODEL = os.environ.get("CODEX_JARVIS_CLASSIFY_MODEL", "gpt-5.6-luna")
 
 # Same 3-way (да/нет/не уверен) contract as claude_watcher.py's "classify"
 # mode -- codex_ask.py's _classify_condition parses the answer identically

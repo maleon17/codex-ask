@@ -2418,7 +2418,7 @@ class CodexAsk(loader.Module):
     async def _classify_condition(self, condition, text, allow_fallback=True):
         """Tier 1: 3-way ("yes"/"no"/"unsure") classification via
         cmd_queue.py's /xclassify, which routes to codex_ask_watcher.py's
-        mode='classify' (CODEX_CLASSIFY_MODEL, gpt-5.4 as of 2026-08-29 --
+        mode='classify' (CODEX_CLASSIFY_MODEL, gpt-5.6-luna as of 2026-09-13 --
         no Haiku equivalent on this side, but same flat ChatGPT-subscription
         auth, not a metered external API -- see cmd_queue.py's
         classify_semantic_codex for the full story). Lighter than the heavy
