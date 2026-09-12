@@ -89,7 +89,7 @@ POLL_TIMEOUT_S = 600  # agentic file-editing tasks can genuinely take a while
 # Telegram exposes every streaming edit as a separate update but gives no
 # "generation finished" event. Wait for a short quiet period before semantic
 # triggers inspect the message's final revision.
-EDIT_TRIGGER_IDLE_SECONDS = 2
+EDIT_TRIGGER_IDLE_SECONDS = 10
 # Braille-spinner "thinking" animation (edit-driven, ~0.5s cadence) -- PRIVATE
 # chats only (see _do_ask/_poll_progress_and_result's `animate` flag). The
 # owner's own account was once banned from a GROUP over exactly this kind of
