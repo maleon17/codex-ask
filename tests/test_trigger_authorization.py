@@ -29,6 +29,7 @@ def _install_import_stubs():
     loader.watcher = lambda *args, **kwargs: (lambda value: value)
     loader.loop = lambda *args, **kwargs: (lambda value: value)
     loader.command = lambda *args, **kwargs: (lambda value: value)
+    loader.raw_handler = lambda *args: (lambda value: value)
     root.loader = loader
     root.utils = types.SimpleNamespace()
     sys.modules[root_name] = root
@@ -66,7 +67,7 @@ def _install_import_stubs():
         setattr(herokutl.tl.functions.contacts, name, type(name, (), {}))
     for name in (
         "MessageEntityUrl", "MessageEntityTextUrl", "Channel",
-        "ChannelParticipantsAdmins",
+        "ChannelParticipantsAdmins", "UpdateEditMessage", "UpdateEditChannelMessage",
     ):
         setattr(herokutl.tl.types, name, type(name, (), {}))
     herokutl.tl.custom.Message = type("Message", (), {})
@@ -135,6 +136,10 @@ def make_module(triggers=None):
     return instance
 
 
+def test_legacy_external_loader_adapter_returns_codex_module():
+    assert isinstance(codex_ask.register("external-test"), codex_ask.loader.Module)
+
+
 def trigger(trigger_id="trigger-1", **extra):
     value = {
         "id": trigger_id,
@@ -171,6 +176,42 @@ def test_trigger_agent_and_reply_enqueue_non_owner_context(monkeypatch, action):
     assert requester_id == "trigger:trigger-1"
     assert requester_id != OWNER_ID
     assert not requester_id.isdigit()
+
+
+def test_reply_trigger_does_not_duplicate_successful_send_message(monkeypatch):
+    bot = make_module()
+    trig = trigger(action="reply")
+    message = FakeMessage()
+
+    def enqueue_and_mark_sent(*args, **kwargs):
+        bot._mark_sent_message(CURRENT_CHAT_ID, "✅ Сообщение отправлено")
+        return True
+
+    bot._enqueue = Mock(side_effect=enqueue_and_mark_sent)
+    bot._backend_failed = Mock(return_value=False)
+    bot._fetch_ask_status = Mock(
+        side_effect=lambda req_id: {"request_id": req_id, "done": True, "answer": "already sent"}
+    )
+    monkeypatch.setattr(codex_ask.asyncio, "sleep", AsyncMock())
+
+    assert run_async(
+        bot._fire_reply_via_agent(trig, message, "watched chat", "sender", allow_fallback=False)
+    )
+    message.reply.assert_not_awaited()
+
+
+def test_edited_trigger_reloads_final_message_before_matching(monkeypatch):
+    bot = make_module()
+    peer = object()
+    final_message = FakeMessage()
+    bot._client = types.SimpleNamespace(get_messages=AsyncMock(return_value=final_message))
+    bot.trigger_watcher = AsyncMock()
+    monkeypatch.setattr(codex_ask.asyncio, "sleep", AsyncMock())
+
+    run_async(bot._dispatch_edited_trigger_after_idle(("PeerUser", 1, 77), peer, 77))
+
+    bot._client.get_messages.assert_awaited_once_with(peer, ids=77)
+    bot.trigger_watcher.assert_awaited_once_with(final_message)
 
 
 def test_trigger_context_is_bound_to_current_topic():
@@ -288,6 +329,38 @@ def test_invalid_allowed_tools_are_rejected():
         "instruction": "answer", "allowed_tools": {"register_trigger": True},
     })
     assert error == "allowed_tools должен быть списком имён tools"
+
+
+def test_agent_trigger_report_destination_is_validated_and_persisted():
+    bot = make_module()
+    trigger_spec, error = bot._build_trigger({
+        "kind": "keyword", "value": ["ping"], "action": "agent",
+        "instruction": "answer", "report_to": "notify",
+    })
+    assert error is None
+    assert trigger_spec["report_to"] == "notify"
+
+    _, error = bot._build_trigger({
+        "kind": "keyword", "value": ["ping"], "action": "agent",
+        "instruction": "answer", "report_to": "somewhere",
+    })
+    assert error == "report_to для action=agent должен быть origin или notify"
+
+    _, error = bot._build_trigger({
+        "kind": "keyword", "value": ["ping"], "action": "reply",
+        "reply_text": "pong", "report_to": "notify",
+    })
+    assert error == "report_to поддерживается только для action=agent"
+
+
+def test_agent_report_to_notify_never_posts_back_to_trigger_origin():
+    bot = make_module()
+    bot._client = types.SimpleNamespace(send_message=AsyncMock())
+    run_async(bot._reply_to_origin(
+        trigger(report_to="notify", registration_chat_id=CURRENT_CHAT_ID), "final report",
+    ))
+    bot._notify_topic.assert_awaited_once_with("notify", "final report")
+    bot._client.send_message.assert_not_awaited()
 
 
 def test_non_owner_history_tools_cannot_target_another_chat():

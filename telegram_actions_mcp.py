@@ -249,7 +249,7 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
     (регистрирует сразу несколько триггеров одним вызовом), каждый вида
     {"kind": "keyword"|"link"|"button"|"semantic"|"any", "value": ...,
     "action": "notify"|"reply"|"delete"|"confirm"|"agent"|"post", "engine": "claude"|"codex", "verify": "...",
-    "instruction": "...", "reply_text": "...", "label": "...",
+    "instruction": "...", "reply_text": "...", "label": "...", "report_to": "origin"|"notify",
     "trusted_senders": [...], "only_senders": [...], "skip_admins": true|false,
     "confirm_users": [...], "target": "...", "template": "...", "as_bot": true|false}.
     trusted_senders/skip_admins -- исключения по отправителю (id, @username
@@ -314,7 +314,11 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
     самое гибкое -- при срабатывании instruction (обычным языком) выполняется
     полноценным агентным вызовом с доступом ко ВСЕМ этим же tools, оставь
     для случаев, где реально нужно рассуждение/несколько шагов, а не просто
-    форматирование и отправка.
+    форматирование и отправка. report_to относится только к action=agent:
+    origin (по умолчанию) кладёт финальный отчёт в тред, где триггер создали;
+    notify кладёт его в дефолтный топик уведомлений. Для автоответчика,
+    который уже вызывает send_message человеку, указывай report_to=notify,
+    иначе финальный текст агента будет вторым сообщением в исходном чате.
     verify (опционально, для keyword/link/button) -- текстовое условие,
     дополнительно проверяемое Haiku перед действием (например "это
     сообщение является рекламой") -- используй когда простое совпадение
@@ -354,7 +358,7 @@ def edit_trigger(trigger_id: str, updates: dict, chat: str = "") -> str:
     verify, поменять action/target/template и т.п.), а не пересоздание.
     trigger_id -- id из list_triggers. updates -- ЧАСТИЧНЫЙ объект, те же
     поля что у specs в register_trigger (kind/value/action/verify/
-    instruction/reply_text/label/target/template/as_bot/trusted_senders/
+    instruction/reply_text/label/report_to/target/template/as_bot/trusted_senders/
     only_senders/skip_admins/confirm_users) -- указывай ТОЛЬКО то, что реально меняешь,
     остальное остаётся как было. Явный null у поля ЧИСТИТ его (например
     {"verify": null} снимет verify-условие). id/чат триггера и (для

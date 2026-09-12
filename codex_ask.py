@@ -51,6 +51,7 @@ from herokutl.tl.functions.contacts import (
 )
 from herokutl.tl.types import (
     MessageEntityUrl, MessageEntityTextUrl, Channel, ChannelParticipantsAdmins,
+    UpdateEditMessage, UpdateEditChannelMessage,
 )
 from herokutl.tl.custom import Message
 from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotParticipantError
@@ -85,6 +86,10 @@ INSTANCE_ID = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
 ENGINE = "codex"
 MAX_ROUNDS = 5  # mirrors claude_watcher.py's own round discipline
 POLL_TIMEOUT_S = 600  # agentic file-editing tasks can genuinely take a while
+# Telegram exposes every streaming edit as a separate update but gives no
+# "generation finished" event. Wait for a short quiet period before semantic
+# triggers inspect the message's final revision.
+EDIT_TRIGGER_IDLE_SECONDS = 2
 # Braille-spinner "thinking" animation (edit-driven, ~0.5s cadence) -- PRIVATE
 # chats only (see _do_ask/_poll_progress_and_result's `animate` flag). The
 # owner's own account was once banned from a GROUP over exactly this kind of
@@ -322,6 +327,10 @@ class CodexAsk(loader.Module):
         # (which _reply_to_origin delivers silently via self._client) --
         # only the second case needs its own extra push.
         self._agent_turn_sent = {}
+        # (peer type, peer id, message id) -> delayed task. Incoming bots
+        # frequently stream one response by editing one message many times;
+        # only its final quiet revision should reach semantic triggers.
+        self._edited_trigger_tasks = {}
         # sid -> {pages, index, chat_id, code_msg_id, form} for the .xpersona pager
         self._persona_sessions = {}
         network = self.db.get("CodexAsk", "network", None)
@@ -1302,7 +1311,9 @@ class CodexAsk(loader.Module):
             data = await loop.run_in_executor(None, fetch)
             with open(tmp_path, "wb") as f:
                 f.write(data)
-            await self._client.send_file(entity, tmp_path, caption=f"📤 {_h(fname)}", parse_mode="html")
+            await self._client.send_file(
+                entity, tmp_path, caption=f"📤 {_h(fname)}", parse_mode="html",
+            )
             return f"✅ Отправил файл: {fname}"
         except Exception as e:
             return f"Не смог отправить файл «{fname}»: {e}"
@@ -2040,6 +2051,13 @@ class CodexAsk(loader.Module):
             return None, f"некорректный kind/action: {spec}"
         if action == "agent" and not spec.get("instruction"):
             return None, "action=agent требует instruction"
+        report_to = None
+        if action == "agent":
+            report_to = str(spec.get("report_to") or "origin").strip().lower()
+            if report_to not in ("origin", "notify"):
+                return None, "report_to для action=agent должен быть origin или notify"
+        elif "report_to" in spec:
+            return None, "report_to поддерживается только для action=agent"
         if action == "post" and not spec.get("target"):
             return None, "action=post требует target"
         engine = str(spec.get("engine") or ENGINE).lower()
@@ -2125,6 +2143,11 @@ class CodexAsk(loader.Module):
             # unavailable, stale, or the person just isn't a real chat admin.
             "confirm_users": [str(s) for s in (confirm_users or [])],
         }
+        if report_to is not None:
+            # origin preserves the historical reply thread where the trigger
+            # was created; notify routes the final report into the default
+            # notifications topic.
+            trig["report_to"] = report_to
         if "allowed_tools" in spec:
             trig["allowed_tools"] = allowed_tools
         return trig, None
@@ -2292,6 +2315,8 @@ class CodexAsk(loader.Module):
             except (ValueError, TypeError):
                 chat_label = f"НЕИЗВЕСТНЫЙ ЧАТ (битый ключ {cid!r})"
             line = f"- id={t['id']}, [{t.get('engine', 'claude')}] чат «{chat_label}», {t['kind']} → {t['action']}: {t.get('label', '')}"
+            if t.get("action") == "agent":
+                line += f"\n  отчёт: {t.get('report_to', 'origin')}"
             if t.get("kind") in ("keyword", "link") and t.get("value"):
                 values = t["value"] if isinstance(t["value"], list) else [t["value"]]
                 line += "\n  слова: " + ", ".join(map(str, values))
@@ -2572,6 +2597,7 @@ class CodexAsk(loader.Module):
         # so they need mutual exclusion against EACH OTHER too, not just
         # against repeats of themselves.
         async with self._agent_trigger_lock(message.chat_id):
+            self._agent_turn_sent[str(message.chat_id)] = False
             req_id = str(uuid.uuid4())
             if not self._enqueue(
                 question, message.chat_id, req_id, "chat",
@@ -2595,6 +2621,11 @@ class CodexAsk(loader.Module):
         if not answer or self._backend_failed(answer):
             await self._notify_topic("moderation", "⚠️ Автоответ по триггеру не дождался ответа агента.")
             return False
+        if self._agent_turn_sent.pop(str(message.chat_id), False):
+            # The model already delivered its answer through send_message.
+            # Its short final acknowledgement is not a second reply for the
+            # person who just received that answer.
+            return True
         try:
             await message.reply(answer)
         except Exception as e:
@@ -2850,6 +2881,12 @@ class CodexAsk(loader.Module):
         triggers registered before this field existed, or if the direct
         send fails for any reason (e.g. the origin message got deleted, or
         the owner has since left that chat)."""
+        # report_to=notify is for autonomous responders: their actual
+        # send_message call reaches the counterparty, while the model-final
+        # report is kept out of that chat in the default notifications topic.
+        if trig.get("report_to", "origin") == "notify":
+            await self._notify_topic("notify", text)
+            return
         registration_chat_id = trig.get("registration_chat_id")
         if registration_chat_id:
             try:
@@ -3209,6 +3246,63 @@ class CodexAsk(loader.Module):
                     await self._notify_topic("moderation", f"⚠️ Не смог автоответить: {_h(str(e))}")
             else:
                 await self._fire_reply_via_agent(trig, message, chat_label, sender)
+
+    @loader.raw_handler(UpdateEditMessage, UpdateEditChannelMessage)
+    async def edited_trigger_watcher(self, update):
+        """Coalesce streaming incoming-message edits before trigger matching.
+
+        The framework dispatches MessageEdited only to its command path, not
+        normal watchers. Raw updates are therefore the one reliable source
+        for an edit made by another account. The delayed reread deliberately
+        goes through trigger_watcher, so edited and newly-created messages
+        share the exact same authorization and matching pipeline.
+        """
+        message = getattr(update, "message", None)
+        if not message or getattr(message, "out", False):
+            return
+        peer = getattr(message, "peer_id", None)
+        message_id = getattr(message, "id", None)
+        if peer is None or not message_id:
+            return
+        peer_id = (
+            getattr(peer, "channel_id", None)
+            or getattr(peer, "chat_id", None)
+            or getattr(peer, "user_id", None)
+        )
+        if peer_id is None:
+            return
+        key = (type(peer).__name__, peer_id, message_id)
+        tasks = getattr(self, "_edited_trigger_tasks", None)
+        if tasks is None:
+            tasks = self._edited_trigger_tasks = {}
+        previous = tasks.get(key)
+        if previous and not previous.done():
+            previous.cancel()
+        tasks[key] = asyncio.create_task(
+            self._dispatch_edited_trigger_after_idle(key, peer, message_id)
+        )
+
+    async def _dispatch_edited_trigger_after_idle(self, key, peer, message_id):
+        try:
+            await asyncio.sleep(EDIT_TRIGGER_IDLE_SECONDS)
+            message = await self._client.get_messages(peer, ids=message_id)
+            if message:
+                await self.trigger_watcher(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # An inaccessible/deleted message is simply no longer a trigger
+            # candidate; do not turn a third-party bot's transient edit into
+            # a userbot-wide error.
+            return
+        finally:
+            tasks = getattr(self, "_edited_trigger_tasks", {})
+            if tasks.get(key) is asyncio.current_task():
+                tasks.pop(key, None)
+
+    async def on_unload(self):
+        for task in getattr(self, "_edited_trigger_tasks", {}).values():
+            task.cancel()
 
     @loader.watcher()
     async def trigger_watcher(self, message):
@@ -4107,3 +4201,14 @@ class CodexAsk(loader.Module):
         except Exception:
             pass
         await self._persona_ack(call, "Сохранено")
+
+
+def register(module_name):
+    """Compatibility entry point for legacy Heroku external loaders.
+
+    Current loaders discover ``CodexAsk`` directly as a ``loader.Module``.
+    Older deployments fall back to ``module.register(module_name)`` when
+    that discovery fails, so returning the same module instance here keeps
+    the file loadable on both generations.
+    """
+    return CodexAsk()
