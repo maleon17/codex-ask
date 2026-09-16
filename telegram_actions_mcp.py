@@ -33,7 +33,12 @@ import uuid
 
 from mcp.server.mcpserver import MCPServer
 
-CMDQ = "http://127.0.0.1:9092"  # same host as claude -p; no funnel needed here
+CMDQ = os.environ.get("JARVIS_RELAY_URL", "http://127.0.0.1:9092")
+RELAY_TOKEN = os.environ.get("JARVIS_RELAY_TOKEN", "")
+try:
+    RELAY_TOKENS = json.loads(os.environ.get("JARVIS_RELAY_TOKENS_JSON", "{}"))
+except ValueError:
+    RELAY_TOKENS = {}
 POLL_TIMEOUT_S = 30
 POLL_INTERVAL_S = 0.5
 
@@ -67,17 +72,44 @@ def _current_requester_id():
     return "" if value is None else str(value)
 
 
+def _current_request_id():
+    if not CONTEXT_DIR:
+        return os.environ.get("JARVIS_RELAY_REQUEST_ID", "")
+    key = f"{INSTANCE_ID}\0{CHAT_ID}".encode("utf-8")
+    path = os.path.join(CONTEXT_DIR, f"{hashlib.sha256(key).hexdigest()}.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle).get("request_id")
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return ""
+    return "" if value is None else str(value)
+
+
+def _relay_headers(content_type=None):
+    token = RELAY_TOKENS.get(INSTANCE_ID, RELAY_TOKEN) if isinstance(RELAY_TOKENS, dict) else RELAY_TOKEN
+    headers = {"Authorization": f"Bearer {token}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
 def _call_tool(tool: str, args: dict) -> str:
     req_id = str(uuid.uuid4())
     body = json.dumps({
         "request_id": req_id, "instance_id": INSTANCE_ID, "chat_id": CHAT_ID,
-        "requester_id": _current_requester_id(), "tool": tool, "args": args,
+        "requester_id": _current_requester_id(), "parent_request_id": _current_request_id(),
+        "tool": tool, "args": args,
     }).encode()
     try:
+        if tool == "send_file":
+            artifact = json.dumps({"instance_id": INSTANCE_ID, "path": args.get("path", "")}).encode()
+            urllib.request.urlopen(urllib.request.Request(
+                f"{CMDQ}/artifact", data=artifact, headers=_relay_headers("application/json"), method="POST",
+            ), timeout=5)
         urllib.request.urlopen(
             urllib.request.Request(
                 f"{CMDQ}/tool_call", data=body,
-                headers={"Content-Type": "application/json"}, method="POST",
+                headers=_relay_headers("application/json"), method="POST",
             ),
             timeout=5,
         )
@@ -88,7 +120,8 @@ def _call_tool(tool: str, args: dict) -> str:
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_S)
         try:
-            with urllib.request.urlopen(f"{CMDQ}/tool_call?request_id={req_id}", timeout=5) as r:
+            request = urllib.request.Request(f"{CMDQ}/tool_call?request_id={req_id}", headers=_relay_headers())
+            with urllib.request.urlopen(request, timeout=5) as r:
                 data = json.loads(r.read())
         except Exception:
             continue

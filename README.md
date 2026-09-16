@@ -72,10 +72,17 @@ reply to the document with `.lm`. Once loaded, `.xask` and the rest of the
 commands become available in the userbot. Userbot/Telegram tokens are not
 part of this repository.
 
-After loading, run `.xasknet local <instance_id>` or
+After loading, run `.xasknet token <token>` and `.xasknet local <instance_id>` or
 `.xasknet tailnet <instance_id> <backend_url>` once to configure the
 network for that instance. This setting replaces configuration via
 environment variables only.
+
+The shared relay requires a bearer token per instance. `.xasknet token`
+stores it in the userbot's persistent module configuration and only displays
+whether a token is configured, never its value. The local worker's
+`telegram_actions_mcp.py` receives `JARVIS_RELAY_TOKEN` (one instance) or
+`JARVIS_RELAY_TOKENS_JSON` (an instance-to-token map) from its root-owned
+environment file; do not put either in `codex-config.toml` or this repository.
 
 ## Updating
 

@@ -12,6 +12,9 @@ Environment=PATH=/home/__USER__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/s
 # Optional: owner name/id for the persona template, and chats where the
 # persona's profanity is suppressed. Written by setup.sh; '-' = ok if absent.
 EnvironmentFile=-__INSTALL_DIR__/jarvis.env
+# JARVIS_RELAY_TOKEN (one instance) or JARVIS_RELAY_TOKENS_JSON (many
+# instances) in this root-owned EnvironmentFile authenticates the local
+# telegram_actions_mcp.py client to the shared relay.
 Environment=CODEX_HOME=__CODEX_HOME__
 Environment=CODEX_JARVIS_CODEX_HOME=__CODEX_HOME__
 Environment=CODEX_JARVIS_CWD=__CODEX_CWD__
