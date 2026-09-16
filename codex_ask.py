@@ -3423,6 +3423,13 @@ class CodexAsk(loader.Module):
         args = data.get("args") or {}
         chat_id = data.get("chat_id") or ""
         requester_id = data.get("requester_id")
+        if float(data.get("expires_at", float("inf"))) <= time.time():
+            if req_id:
+                try:
+                    await loop.run_in_executor(None, self._post_tool_call_result, req_id, "Не выполнено: истёк срок задания.")
+                except Exception:
+                    pass
+            return
         try:
             if not await self._tool_request_is_authorized(
                 requester_id, chat_id, tool=tool, args=args,

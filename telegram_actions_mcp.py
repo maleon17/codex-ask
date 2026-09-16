@@ -95,10 +95,12 @@ def _relay_headers(content_type=None):
 
 def _call_tool(tool: str, args: dict) -> str:
     req_id = str(uuid.uuid4())
+    deadline = time.time() + POLL_TIMEOUT_S
     body = json.dumps({
         "request_id": req_id, "instance_id": INSTANCE_ID, "chat_id": CHAT_ID,
         "requester_id": _current_requester_id(), "parent_request_id": _current_request_id(),
         "tool": tool, "args": args,
+        "expires_at": deadline,
     }).encode()
     try:
         if tool == "send_file":
@@ -116,7 +118,6 @@ def _call_tool(tool: str, args: dict) -> str:
     except Exception as e:
         return f"Не удалось поставить действие в очередь: {e}"
 
-    deadline = time.time() + POLL_TIMEOUT_S
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_S)
         try:
@@ -127,7 +128,9 @@ def _call_tool(tool: str, args: dict) -> str:
             continue
         if data.get("done"):
             return data.get("result") or "(пустой результат)"
-    return "Таймаут: удалённый юзербот не ответил за 30 секунд."
+    # The relay refuses an expired item on its next claim. A prior claim may
+    # already be executing, so it must not be acknowledged/cancelled here.
+    return "Таймаут: результат неизвестен (задание могло уже быть выдано исполнителю)."
 
 
 @mcp.tool()

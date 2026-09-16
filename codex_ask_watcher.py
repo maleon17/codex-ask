@@ -81,6 +81,9 @@ DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
 PROGRESS_THROTTLE = float(os.environ.get("CODEX_JARVIS_PROGRESS_THROTTLE", "1.0"))
+WORKER_QUEUE_MAX = int(os.environ.get("CODEX_JARVIS_WORKER_QUEUE_MAX", "64"))
+WORKER_CONCURRENCY = int(os.environ.get("CODEX_JARVIS_WORKER_CONCURRENCY", "4"))
+SESSION_IDLE_S = float(os.environ.get("CODEX_JARVIS_SESSION_IDLE_S", "3600"))
 
 # Ported verbatim from claude-jarvis/claude_watcher.py's BASE_PERSONA (the
 # ClaudeAsk persona) so CodexAsk isn't a differently-branded, thinner
@@ -199,8 +202,15 @@ def _atomic_json(path: Path, value: dict) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _tool_context_path(instance_id: str, chat_id: str) -> Path:
@@ -587,6 +597,7 @@ class ChatSession:
         self.lock = threading.RLock()
         self.turn_lock = threading.Lock()
         self.active: TurnState | None = None
+        self.last_used = time.monotonic()
         self.thread_id = index.get(instance_id, chat_id)
         self.tool_context_path = _tool_context_path(instance_id, chat_id)
         env = dict(os.environ)
@@ -666,6 +677,7 @@ class ChatSession:
         # request instead of letting turns overwrite ``self.active`` and
         # each other's tool-call context.
         with self.turn_lock:
+            self.last_used = time.monotonic()
             self._handle(request)
 
     def _handle(self, request: dict) -> None:
@@ -766,6 +778,58 @@ class Worker:
         self.sessions: dict[str, ChatSession] = {}
         self.sessions_lock = threading.RLock()
         self.stop_event = threading.Event()
+        self.pending = queue.Queue(maxsize=WORKER_QUEUE_MAX)
+        self.admitted = set()
+        self.admitted_lock = threading.Lock()
+        self.workers = [threading.Thread(target=self._consume, daemon=True) for _ in range(WORKER_CONCURRENCY)]
+        for thread in self.workers:
+            thread.start()
+
+    def admit(self, path: Path) -> bool:
+        with self.admitted_lock:
+            if path in self.admitted:
+                return False
+            try:
+                self.pending.put_nowait(path)
+            except queue.Full:
+                return False
+            self.admitted.add(path)
+            return True
+
+    def _consume(self):
+        while not self.stop_event.is_set():
+            try:
+                path = self.pending.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                self._process_request(path)
+            finally:
+                with self.admitted_lock:
+                    self.admitted.discard(path)
+                self.pending.task_done()
+
+    def recover_processing(self):
+        for path in sorted(QUEUE_DIR.glob("*.json.processing")):
+            req_id = path.name.split(".json.processing", 1)[0]
+            _atomic_json(RESULT_DIR / f"{req_id}.json", {
+                "done": True, "request_id": req_id,
+                "answer": "⚠️ Запрос прерван перезапуском worker; действие не повторялось.", "thoughts": [],
+            })
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _cleanup_idle_sessions(self):
+        cutoff = time.monotonic() - SESSION_IDLE_S
+        with self.sessions_lock:
+            stale = [(key, session) for key, session in self.sessions.items()
+                     if session.last_used < cutoff and not session.turn_lock.locked()]
+            for key, _ in stale:
+                self.sessions.pop(key, None)
+        for _, session in stale:
+            session.close()
 
     def _session(self, instance_id: str, chat_id: str) -> ChatSession:
         key = SessionIndex.key(instance_id, chat_id)
@@ -825,12 +889,14 @@ class Worker:
 
     def run(self) -> None:
         log(f"started; queue={QUEUE_DIR} result={RESULT_DIR} codex_home={CODEX_HOME}")
+        self.recover_processing()
         while not self.stop_event.is_set():
             try:
                 for reset in sorted(RESET_DIR.glob("*.json")):
                     self._process_reset(reset)
                 for path in sorted(QUEUE_DIR.glob("*.json")):
-                    threading.Thread(target=self._process_request, args=(path,), daemon=True).start()
+                    self.admit(path)
+                self._cleanup_idle_sessions()
             except Exception as exc:
                 log(f"poll error: {exc}")
             self.stop_event.wait(POLL_INTERVAL)
