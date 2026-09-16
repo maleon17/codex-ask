@@ -59,30 +59,51 @@ EXCLUDE_MSG_ID = int(os.environ.get("CODEX_TELEGRAM_EXCLUDE_MSG_ID") or os.envir
 mcp = MCPServer("telegram-actions")
 
 
-def _current_requester_id():
+def _current_context():
+    """Read the request-scoped context written by the watcher for this turn."""
     if not CONTEXT_DIR:
-        return REQUESTER_ID
+        return None
     key = f"{INSTANCE_ID}\0{CHAT_ID}".encode("utf-8")
     path = os.path.join(CONTEXT_DIR, f"{hashlib.sha256(key).hexdigest()}.json")
     try:
         with open(path, encoding="utf-8") as handle:
-            value = json.load(handle).get("requester_id")
+            value = json.load(handle)
     except (FileNotFoundError, OSError, ValueError, TypeError):
-        return ""
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _current_requester_id():
+    context = _current_context()
+    if context is None:
+        return REQUESTER_ID
+    value = context.get("requester_id")
     return "" if value is None else str(value)
 
 
 def _current_request_id():
-    if not CONTEXT_DIR:
+    context = _current_context()
+    if context is None:
         return os.environ.get("JARVIS_RELAY_REQUEST_ID", "")
-    key = f"{INSTANCE_ID}\0{CHAT_ID}".encode("utf-8")
-    path = os.path.join(CONTEXT_DIR, f"{hashlib.sha256(key).hexdigest()}.json")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle).get("request_id")
-    except (FileNotFoundError, OSError, ValueError, TypeError):
-        return ""
+    value = context.get("request_id")
     return "" if value is None else str(value)
+
+
+def _current_int(name, fallback):
+    context = _current_context()
+    value = fallback if context is None else context.get(name)
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_topic_id():
+    return _current_int("topic_id", TOPIC_ID)
+
+
+def _current_exclude_msg_id():
+    return _current_int("message_id", EXCLUDE_MSG_ID)
 
 
 def _relay_headers(content_type=None):
@@ -372,7 +393,7 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
     ответят", если это не сделано по-настоящему. Когда дело закрыто,
     вызови remove_trigger на этот же id."""
     return _call_tool(
-        "register_trigger", {"specs": specs, "chat": chat, "anchor_msg_id": EXCLUDE_MSG_ID},
+        "register_trigger", {"specs": specs, "chat": chat, "anchor_msg_id": _current_exclude_msg_id()},
     )
 
 
@@ -430,7 +451,9 @@ def search_chat(keyword: str, limit: int = 20, chat: str = "") -> str:
     название чата; пусто/'this' = ТЕКУЩИЙ чат (по умолчанию). Можно искать
     в ЛЮБОМ другом чате из существующих диалогов (личка, группа, канал) --
     не только в текущем."""
-    return _call_tool("search_chat", {"keyword": keyword, "limit": limit, "topic_id": TOPIC_ID, "chat": chat})
+    return _call_tool("search_chat", {
+        "keyword": keyword, "limit": limit, "topic_id": _current_topic_id(), "chat": chat,
+    })
 
 
 @mcp.tool()
@@ -453,7 +476,7 @@ def read_history(count: int = 50, direction: str = "", reply_id: int = 0, chat: 
     переписке с папой")."""
     return _call_tool("read_history", {
         "count": count, "direction": direction or None, "reply_id": reply_id or None,
-        "topic_id": TOPIC_ID, "exclude_id": EXCLUDE_MSG_ID, "chat": chat,
+        "topic_id": _current_topic_id(), "exclude_id": _current_exclude_msg_id(), "chat": chat,
     })
 
 

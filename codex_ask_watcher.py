@@ -80,6 +80,7 @@ CLASSIFY_PROMPT = (
 DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
+TURN_INTERRUPT_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_INTERRUPT_TIMEOUT", "15"))
 PROGRESS_THROTTLE = float(os.environ.get("CODEX_JARVIS_PROGRESS_THROTTLE", "1.0"))
 WORKER_QUEUE_MAX = int(os.environ.get("CODEX_JARVIS_WORKER_QUEUE_MAX", "64"))
 WORKER_CONCURRENCY = int(os.environ.get("CODEX_JARVIS_WORKER_CONCURRENCY", "4"))
@@ -420,8 +421,12 @@ def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
 
 
 class TurnState:
-    def __init__(self, request_id: str):
+    def __init__(self, request_id: str, generation: int = 0):
         self.request_id = request_id
+        self.generation = generation
+        self.thread_id: str | None = None
+        self.turn_id: str | None = None
+        self.pending_notifications: list[tuple[str, dict]] = []
         self.lock = threading.RLock()
         self.done = threading.Event()
         self.items: list[dict] = []
@@ -597,6 +602,9 @@ class ChatSession:
         self.lock = threading.RLock()
         self.turn_lock = threading.Lock()
         self.active: TurnState | None = None
+        self.generation = 0
+        self.resetting = False
+        self.new_context_notice = ""
         self.last_used = time.monotonic()
         self.thread_id = index.get(instance_id, chat_id)
         self.tool_context_path = _tool_context_path(instance_id, chat_id)
@@ -622,17 +630,52 @@ class ChatSession:
             'CODEX_TELEGRAM_INSTANCE_ID="' + str(instance_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
             'CODEX_TELEGRAM_CONTEXT_DIR="' + str(TOOL_CONTEXT_DIR).replace("\\", "\\\\").replace('"', '\\"') + '"}'
         )
-        self.client = AppServerClient(
-            self._notification, lambda msg: log(f"{instance_id}:{chat_id} {msg}"), env=env,
-            extra_args=["-c", mcp_env_override],
+        self._client_env = env
+        self._mcp_env_override = mcp_env_override
+        self.client = self._new_client()
+
+    def _new_client(self, restricted: bool = False):
+        extra_args = ["-c", "mcp_servers={}"] if restricted else ["-c", self._mcp_env_override]
+        return AppServerClient(
+            self._notification, lambda msg: log(f"{self.instance_id}:{self.chat_id} {msg}"),
+            env=self._client_env, extra_args=extra_args,
         )
+
+    @staticmethod
+    def _event_ids(params: dict) -> tuple[str | None, str | None]:
+        turn = params.get("turn") or {}
+        if not isinstance(turn, dict):
+            turn = {}
+        thread_id = params.get("threadId") or turn.get("threadId") or turn.get("thread_id")
+        turn_id = params.get("turnId") or turn.get("id")
+        return (str(thread_id) if thread_id else None, str(turn_id) if turn_id else None)
 
     def _notification(self, method: str, params: dict) -> None:
         with self.lock:
             active = self.active
         if active is None:
             return
-        active.add_notification(method, params or {})
+        params = params or {}
+        thread_id, turn_id = self._event_ids(params)
+        if active.generation != self.generation:
+            log(f"{self.instance_id}:{self.chat_id} ignored stale {method} after reset")
+            return
+        if active.thread_id and thread_id != active.thread_id:
+            log(f"{self.instance_id}:{self.chat_id} ignored {method} for foreign/missing thread {thread_id!r}")
+            return
+        if active.turn_id is None:
+            if turn_id:
+                active.pending_notifications.append((method, params))
+                log(f"{self.instance_id}:{self.chat_id} deferred {method} until turn id is confirmed")
+            else:
+                log(f"{self.instance_id}:{self.chat_id} ignored {method} without a turn id")
+            return
+        if turn_id != active.turn_id:
+            log(f"{self.instance_id}:{self.chat_id} ignored {method} for foreign/missing turn {turn_id!r}")
+            return
+        if thread_id:
+            active.thread_id = thread_id
+        active.add_notification(method, params)
         progress = active.progress()
         if progress:
             _atomic_json(RESULT_DIR / f"{active.request_id}.json", {
@@ -649,24 +692,46 @@ class ChatSession:
             params["threadId"] = thread_id
         return params
 
-    def _ensure_thread(self, persistent: bool) -> str:
-        self.client.start_if_needed()
+    @staticmethod
+    def _missing_thread_error(exc: AppServerError) -> bool:
+        message = str(exc).lower()
+        return any(marker in message for marker in (
+            "thread not found", "no rollout found for thread id",
+            "no rollout found for conversation id", "invalid thread id",
+        ))
+
+    def _is_current_generation(self, generation: int) -> bool:
+        with self.lock:
+            return generation == self.generation and not self.resetting
+
+    def _ensure_thread(self, persistent: bool, client=None, generation: int | None = None) -> str:
+        client = client or self.client
+        generation = self.generation if generation is None else generation
+        client.start_if_needed()
         requested = self.thread_id if persistent else None
         if requested:
             try:
-                result = self.client.request("thread/resume", self._thread_params(requested), timeout=60) or {}
+                result = client.request("thread/resume", self._thread_params(requested), timeout=60) or {}
                 thread = (result.get("thread") or {}).get("id")
                 if thread:
                     return thread
+                raise AppServerError("thread/resume returned no thread id")
             except AppServerError as exc:
-                log(f"{self.instance_id}:{self.chat_id} resume failed, starting fresh: {exc}")
+                if not self._missing_thread_error(exc):
+                    raise
+                log(f"{self.instance_id}:{self.chat_id} thread missing; starting a new context")
+                self.new_context_notice = "Прежний контекст Codex не найден; начат новый контекст."
                 self.thread_id = None
                 self.index.remove(self.instance_id, self.chat_id)
-        result = self.client.request("thread/start", self._thread_params(), timeout=60) or {}
+        if not self._is_current_generation(generation):
+            raise AppServerError("session was reset")
+        result = client.request("thread/start", self._thread_params(), timeout=60) or {}
         thread = (result.get("thread") or {}).get("id")
         if not thread:
             raise AppServerError("thread/start returned no thread id")
         if persistent:
+            if not self._is_current_generation(generation):
+                raise AppServerError("session was reset")
             self.thread_id = thread
             self.index.set(self.instance_id, self.chat_id, thread)
         return thread
@@ -689,7 +754,11 @@ class ChatSession:
                 "done": True, "request_id": req_id, "answer": "Пустой вопрос.", "thoughts": [],
             })
             return
-        state = TurnState(req_id)
+        with self.lock:
+            if self.resetting:
+                raise AppServerError("session was reset")
+            generation = self.generation
+        state = TurnState(req_id, generation)
         with self.lock:
             self.active = state
         if mode == "chat":
@@ -697,6 +766,9 @@ class ChatSession:
                 _atomic_json(self.tool_context_path, {
                     "request_id": req_id,
                     "requester_id": request.get("requester_id"),
+                    "topic_id": request.get("topic_id"),
+                    "message_id": request.get("message_id"),
+                    "chat_id": self.chat_id,
                 })
             except Exception as exc:
                 log(f"{self.instance_id}:{self.chat_id} tool context unavailable: {exc}")
@@ -704,8 +776,10 @@ class ChatSession:
                     self.tool_context_path.unlink()
                 except FileNotFoundError:
                     pass
+        client = self.client if mode != "classify" else self._new_client(restricted=True)
         try:
-            thread_id = self._ensure_thread(mode == "chat")
+            thread_id = self._ensure_thread(mode == "chat", client, generation)
+            state.thread_id = thread_id
             if mode == "classify":
                 prompt = f"{CLASSIFY_PROMPT}\n\n{question}"
                 model = CODEX_CLASSIFY_MODEL
@@ -722,24 +796,43 @@ class ChatSession:
                 "approvalPolicy": "never",
                 "model": model,
                 "effort": CODEX_EFFORT,
-                "sandboxPolicy": {
-                    "type": "dangerFullAccess" if CODEX_SANDBOX == "danger-full-access" else (
-                        "readOnly" if CODEX_SANDBOX == "read-only" else "workspaceWrite"
-                    ),
-                    **({"writableRoots": [CODEX_CWD], "networkAccess": True} if CODEX_SANDBOX == "workspace-write" else {}),
-                },
+                "sandboxPolicy": (
+                    {"type": "readOnly", "networkAccess": False} if mode == "classify" else {
+                        "type": "dangerFullAccess" if CODEX_SANDBOX == "danger-full-access" else (
+                            "readOnly" if CODEX_SANDBOX == "read-only" else "workspaceWrite"
+                        ),
+                        **({"writableRoots": [CODEX_CWD], "networkAccess": True} if CODEX_SANDBOX == "workspace-write" else {}),
+                    }
+                ),
             }
-            result = self.client.request("turn/start", params, timeout=60) or {}
+            result = client.request("turn/start", params, timeout=60) or {}
             turn = result.get("turn") or {}
             if isinstance(turn, dict) and turn.get("id"):
                 # The app-server events carry the authoritative completion;
                 # keeping the id is useful in logs and future interrupt work.
                 log(f"{self.instance_id}:{self.chat_id} turn {turn['id']} started")
+                state.turn_id = str(turn["id"])
+                deferred = state.pending_notifications
+                state.pending_notifications = []
+                for deferred_method, deferred_params in deferred:
+                    self._notification(deferred_method, deferred_params)
             if not state.done.wait(TURN_TIMEOUT):
-                state.error = "Codex не завершил запрос за отведённое время."
+                try:
+                    client.request("turn/interrupt", {
+                        "threadId": thread_id,
+                        **({"turnId": state.turn_id} if state.turn_id else {}),
+                    }, timeout=TURN_INTERRUPT_TIMEOUT)
+                    state.error = "Codex не завершил запрос за отведённое время и был остановлен."
+                except Exception as exc:
+                    log(f"{self.instance_id}:{self.chat_id} interrupt failed: {exc}")
+                    state.error = "Codex не завершил запрос за отведённое время; app-server перезапущен."
+                    client.close()
             answer = state.answer()
             if state.error:
                 answer = f"⚠️ {state.error}"
+            if self.new_context_notice:
+                answer = f"{self.new_context_notice}\n\n{answer}"
+                self.new_context_notice = ""
             if not answer:
                 answer = "(Codex не вернул текста ответа)"
             _atomic_json(RESULT_DIR / f"{req_id}.json", {
@@ -758,7 +851,10 @@ class ChatSession:
             })
         finally:
             with self.lock:
-                self.active = None
+                if self.active is state:
+                    self.active = None
+            if mode == "classify":
+                client.close()
             try:
                 with self.tool_context_path.open(encoding="utf-8") as handle:
                     context = json.load(handle)
@@ -768,7 +864,26 @@ class ChatSession:
                 pass
 
     def close(self) -> None:
+        with self.lock:
+            state = self.active
+            if state is not None:
+                state.error = state.error or "app-server закрыт"
+                state.done.set()
         self.client.close()
+
+    def begin_reset(self) -> None:
+        with self.lock:
+            self.generation += 1
+            self.resetting = True
+            state = self.active
+            if state is not None:
+                state.error = "сессия сброшена"
+                state.done.set()
+        self.client.close()
+
+    def finish_reset(self) -> None:
+        with self.lock:
+            self.resetting = False
 
 
 class Worker:
@@ -854,8 +969,15 @@ class Worker:
         with self.sessions_lock:
             session = self.sessions.pop(key, None)
         if session:
-            session.close()
-        self.index.remove(instance_id, chat_id)
+            # Signal a blocked app-server wait before taking turn_lock; once
+            # it exits, reset owns the lock and no stale worker can restore
+            # the index or create/resume a thread after this point.
+            session.begin_reset()
+            with session.turn_lock:
+                self.index.remove(instance_id, chat_id)
+                session.finish_reset()
+        else:
+            self.index.remove(instance_id, chat_id)
         try:
             path.unlink()
         except FileNotFoundError:
