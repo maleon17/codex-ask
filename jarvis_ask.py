@@ -19,6 +19,7 @@ ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX)
 # keyword anywhere in an answer can mistake a legitimate explanation of rate
 # limits or quotas for a transport failure and incorrectly repeat a trigger.
 BACKEND_FAILURE_PREFIXES = (
+    "[[backend_error:",
     "Ошибка воркера:",
     "⚠️ Ошибка Codex:",
     "⚠️ Ошибка очереди:",
@@ -26,7 +27,12 @@ BACKEND_FAILURE_PREFIXES = (
     "⚠️ Лимит аккаунта Codex исчерпан.",
     "⚠️ Бюджет этой сессии исчерпан.",
     "⚠️ Контекст сессии исчерпан.",
+    "Ошибка Claude:",
+    "⚠️ Ошибка Claude:",
+    "Ошибка Claude: [",
 )
+
+ACTION_PRIORITY = {"reply": 0, "agent": 1, "post": 2, "confirm": 3, "delete": 4}
 
 
 @loader.tds
@@ -66,6 +72,7 @@ class JarvisAsk(loader.Module):
         # this coordinator free of a third watcher is intentional: both
         # watchers call into the same owner field and therefore cannot execute
         # one trigger twice.
+        self._handled_messages = set()
         return
 
     def _get_triggers(self):
@@ -84,6 +91,16 @@ class JarvisAsk(loader.Module):
         """
         if not isinstance(message, Message) or message.out:
             return
+        seen = getattr(self, "_handled_messages", None)
+        if seen is None:
+            seen = self._handled_messages = set()
+        identity = (str(message.chat_id), getattr(message, "id", None))
+        if identity in seen:
+            return
+        seen.add(identity)
+        # Bound this in-memory guard; Telegram ids are unique per chat.
+        if len(seen) > 4096:
+            seen.pop()
         owner = str(owner or ENGINE_CLAUDE).lower()
         backend = backend or self.backend(owner)
         if backend is None:
@@ -97,18 +114,24 @@ class JarvisAsk(loader.Module):
         resolved = []
         for trigger in chat_triggers:
             engine = self.engine_for_trigger(trigger)
-            if engine != owner:
+            target_backend = self.backend(engine)
+            if target_backend is None:
                 continue
-            if await backend._is_trigger_exempt(trigger, message):
+            if await target_backend._is_trigger_exempt(trigger, message):
                 continue
-            if not await backend._trigger_matches(trigger, message):
+            if not await target_backend._trigger_matches(trigger, message):
                 continue
             if trigger.get("verify"):
-                action = await backend._resolve_verified_action(trigger, message)
+                action = await target_backend._resolve_verified_action(trigger, message)
                 if action == "none":
                     continue
-                resolved.append({**trigger, "action": action})
+                resolved.append((engine, {**trigger, "action": action}))
             else:
-                resolved.append(trigger)
+                resolved.append((engine, trigger))
         if resolved:
-            await backend._fire_triggers(resolved, message)
+            priority = max(ACTION_PRIORITY.get(t.get("action"), -1) for _, t in resolved)
+            chosen = [(engine, t) for engine, t in resolved if ACTION_PRIORITY.get(t.get("action"), -1) == priority]
+            for engine in ENGINES:
+                engine_triggers = [t for e, t in chosen if e == engine]
+                if engine_triggers:
+                    await self.backend(engine)._fire_triggers(engine_triggers, message)

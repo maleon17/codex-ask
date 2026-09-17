@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -77,3 +78,26 @@ def test_error_keyword_later_in_model_prose_is_not_a_failure():
     answer = "Я объясню, что такое quota; это не ошибка воркера и повторять запрос не нужно."
 
     assert not jarvis_ask.JarvisAsk.is_failure(answer)
+
+
+def test_coordinator_deduplicates_watchers_and_applies_cross_engine_priority():
+    class Backend:
+        def __init__(self):
+            self.fired = []
+        async def _is_trigger_exempt(self, trigger, message): return False
+        async def _trigger_matches(self, trigger, message): return True
+        async def _fire_triggers(self, triggers, message): self.fired.extend(triggers)
+
+    claude, codex = Backend(), Backend()
+    coordinator = jarvis_ask.JarvisAsk()
+    coordinator.db = types.SimpleNamespace(get=lambda *_: {"1": [
+        {"engine": "claude", "action": "delete"},
+        {"engine": "codex", "action": "reply"},
+    ]})
+    coordinator.lookup = lambda name: claude if name == "ClaudeAsk" else codex
+    message = jarvis_ask.Message()
+    message.chat_id, message.id, message.out = 1, 7, False
+    asyncio.run(coordinator.handle_message(message, "claude", claude))
+    asyncio.run(coordinator.handle_message(message, "codex", codex))
+    assert [t["action"] for t in claude.fired] == ["delete"]
+    assert codex.fired == []

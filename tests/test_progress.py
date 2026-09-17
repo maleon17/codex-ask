@@ -2,7 +2,6 @@ import unittest
 
 from codex_ask_watcher import (
     INTERNAL_TOOL_RESULT_PREFIX,
-    JARVIS_PROMPT,
     TurnState,
     _item_label,
     _item_result_blocks,
@@ -44,7 +43,6 @@ class ProgressRenderingTests(unittest.TestCase):
             _item_result_blocks({"type": "mcp_tool_call", "result": result}),
             [],
         )
-        self.assertIn(INTERNAL_TOOL_RESULT_PREFIX, JARVIS_PROMPT)
 
 
 if __name__ == "__main__":

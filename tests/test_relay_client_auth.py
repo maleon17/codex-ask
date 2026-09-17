@@ -20,9 +20,9 @@ def test_codex_client_enqueues_with_bearer_token(monkeypatch):
     bot = make_module()
     monkeypatch.setattr(codex_ask, "RELAY_TOKEN", "codex-secret")
     captured = []
-    monkeypatch.setattr(codex_ask.urllib.request, "urlopen", lambda request, **_: captured.append(request) or _Response())
+    monkeypatch.setattr(bot, "_relay_open", lambda request, *_: captured.append(request) or _Response())
 
-    assert bot._enqueue("question", "7", "request-7")
+    assert bot._enqueue("question", "7", "request-7")[0]
     assert captured[0].get_header("Authorization") == "Bearer codex-secret"
 
 
@@ -31,7 +31,7 @@ def test_codex_upload_boundary_is_absent_from_file_bytes(monkeypatch):
     bot = make_module()
     captured = []
     monkeypatch.setattr(codex_ask, "RELAY_TOKEN", "codex-secret")
-    monkeypatch.setattr(codex_ask.urllib.request, "urlopen", lambda request, **_: captured.append(request) or _Response())
+    monkeypatch.setattr(codex_ask, "RELAY_OPENER", type("O", (), {"open": lambda _, request, **__: captured.append(request) or _Response()})())
 
     with patch.object(codex_ask.secrets, "token_hex", side_effect=["collision", "safe-boundary"]):
         assert asyncio.run(bot._upload_to_lightrag(b"collision in file", "proof.bin")) == "/artifact"

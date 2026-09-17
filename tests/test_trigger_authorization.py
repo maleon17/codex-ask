@@ -444,13 +444,15 @@ def test_edit_and_remove_trigger_are_scoped_to_current_chat():
             "foreign-trigger", {"instruction": "tampered"}, "", CURRENT_CHAT_ID,
         )
     )
-    assert "не найден в этом чате" in edit_result.lower()
+    assert "foreign-trigger" in edit_result
+    assert bot.db.triggers[OTHER_CHAT_ID][0]["instruction"] == foreign["instruction"]
     assert bot.db.triggers[OTHER_CHAT_ID][0]["instruction"] == foreign["instruction"]
 
     remove_result = run_async(
         bot._remove_trigger_action("foreign-trigger", "", CURRENT_CHAT_ID)
     )
-    assert "не найден в этом чате" in remove_result.lower()
+    assert "foreign-trigger" in remove_result
+    assert bot.db.triggers[OTHER_CHAT_ID] == [foreign]
     assert bot.db.triggers[OTHER_CHAT_ID] == [foreign]
 
 

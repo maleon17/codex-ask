@@ -23,10 +23,11 @@ trigger-rule storage is shared with ClaudeAsk (`ClaudeAsk`), and both
 modules each have their own active `@loader.watcher()` on incoming
 messages — both call the shared `JarvisAsk` coordinator (`handle_message`),
 which filters by each trigger's `engine` field (`claude`/`codex`), so a
-given trigger is handled by exactly one engine and never fires twice. When
-its own backend is unavailable (account limit, timeout),
-`JarvisAsk.fallback()` switches both the trigger's agent actions and its
-verify classification to the other engine.
+given trigger is handled by exactly one engine and never fires twice. The
+coordinator chooses one action for a whole message (delete > confirm > post
+> agent > reply). Fallback happens only on explicit structured backend
+failures: a timeout is reported without changing engine, and agent/reply
+triggers fail closed.
 
 ## Architecture
 
@@ -67,8 +68,8 @@ run `sudo systemctl daemon-reload && sudo systemctl enable --now codex-jarvis.se
 
 ## Loading the userbot module
 
-Send `codex_ask.py` as a document to the dedicated test Telegram channel and
-reply to the document with `.lm`. Once loaded, `.xask` and the rest of the
+Load `jarvis_ask.py` first, then `codex_ask.py`, as documents into the
+dedicated test Telegram channel and reply to each with `.lm`. Once loaded, `.xask` and the rest of the
 commands become available in the userbot. Userbot/Telegram tokens are not
 part of this repository.
 
@@ -100,7 +101,7 @@ needed.
 ## Verification
 
 ```bash
-python3 -m py_compile app_server.py codex_ask_watcher.py
+./scripts/run_tests.sh
 systemctl status codex-jarvis
 journalctl -u codex-jarvis -f
 ```
@@ -109,6 +110,10 @@ After loading the module, verify a plain `.xask` and a request that
 requires a real tool (`list_triggers`, `read_history`, or `search_chat`).
 The final answer is only produced after the tool's actual result, never
 from the model's own unverified self-report.
+
+`requirements-dev.txt` declares pytest; CI runs this command without secrets
+or live services. CodexAsk has its own watcher; ClaudeAsk has another, while
+the coordinator has no watcher of its own.
 
 ## Product boundaries
 
