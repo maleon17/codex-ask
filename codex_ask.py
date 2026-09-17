@@ -338,7 +338,7 @@ class CodexAsk(loader.Module):
     # A history page contains at most this many items that require network
     # I/O (download + image upload or voice transcription). The next page
     # starts immediately after it, so no media is replaced with a stub.
-    HISTORY_MEDIA_BATCH_SIZE = 3
+    HISTORY_MEDIA_BATCH_SIZE = 1
     READ_HISTORY_TEXT_PAGE_LIMIT = 24000
 
     # -- Forum topics (Phase 1 infra) -----------------------------------------

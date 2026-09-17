@@ -5,5 +5,5 @@
 command = "__MCP_PYTHON__"
 args = ["__INSTALL_DIR__/telegram_actions_mcp.py"]
 startup_timeout_sec = 20.0
-tool_timeout_sec = 40.0
+tool_timeout_sec = 200.0
 default_tools_approval_mode = "auto"

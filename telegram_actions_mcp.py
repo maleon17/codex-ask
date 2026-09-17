@@ -39,7 +39,10 @@ try:
     RELAY_TOKENS = json.loads(os.environ.get("JARVIS_RELAY_TOKENS_JSON", "{}"))
 except ValueError:
     RELAY_TOKENS = {}
-POLL_TIMEOUT_S = 30
+# A history page has at most one expensive media item, but a real voice
+# transcription can still take longer than the old 30-second relay poll.
+# Do not abandon it while the userbot is still producing the requested page.
+POLL_TIMEOUT_S = 180
 POLL_INTERVAL_S = 0.5
 
 # ClaudeAsk historically injects CHAT_ID/INSTANCE_ID.  Codex uses the
