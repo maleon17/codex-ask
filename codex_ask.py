@@ -328,6 +328,13 @@ class _HeadlessReporter:
 @loader.tds
 class CodexAsk(loader.Module):
     strings = {"name": "CodexAsk"}
+    # A class attribute so self.TELEGRAM_TEXT_LIMIT resolves (it did not as
+    # a bare module-level name -- confirmed live in the ClaudeAsk twin of
+    # this file: every _dispatch_answer call raised AttributeError before
+    # delivering a final answer, no matter how short, since nothing ever
+    # set this on an instance outside tests that shadow it directly on
+    # their own bot object).
+    TELEGRAM_TEXT_LIMIT = TELEGRAM_TEXT_LIMIT
 
     # -- Forum topics (Phase 1 infra) -----------------------------------------
 

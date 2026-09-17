@@ -20,6 +20,17 @@ class Message:
         self.edits.append((text, kwargs))
 
 
+def test_telegram_text_limit_resolves_without_test_side_overrides():
+    """Regression: TELEGRAM_TEXT_LIMIT was a bare module-level name, not a
+    class attribute, so self.TELEGRAM_TEXT_LIMIT raised AttributeError on
+    every real instance -- _dispatch_answer crashed before delivering ANY
+    final answer, short or long."""
+    bot = make_module()
+    message = Message()
+    run(bot._dispatch_answer(None, 1, "q", "chat", 0, message, "short answer", []))
+    assert message.edits and "short answer" in message.edits[-1][0]
+
+
 def test_safe_edit_plain_fallback_explicitly_disables_html():
     class HtmlDefault(Message):
         async def edit(self, text, **kwargs):
