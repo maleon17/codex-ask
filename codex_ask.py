@@ -1274,16 +1274,63 @@ class CodexAsk(loader.Module):
             key, newest_id = pending
             self.db.set("CodexAsk", key, newest_id)
 
-    async def _build_trigger_chat_context(self, message):
+    def _trigger_context_anchor_key(self, trig, message):
+        """A trigger has its own cursor, never the owner's .xask cursor."""
+        topic_id = self._topic_of(message)
+        key = f"trigger_context_seen_{trig.get('id', 'unknown')}_{message.chat_id}"
+        return f"{key}_{topic_id}" if topic_id else key
+
+    async def _get_trigger_chat_history_delta(self, trig, message, fallback_limit=15):
+        """The trigger equivalent of _get_chat_history_delta, kept isolated.
+
+        The separate cursor lets an automatic turn see every new message
+        since its previous firing without consuming the owner's interactive
+        history delta.
+        """
+        key = self._trigger_context_anchor_key(trig, message)
+        anchor = self.db.get("CodexAsk", key, None)
+        if anchor is None:
+            text = await self._get_chat_history(message, limit=fallback_limit)
+            if text.startswith("[Не удалось получить историю:"):
+                return text, False, None
+            return text, False, (key, message.id)
+
+        try:
+            topic_id = self._topic_of(message)
+            kwargs = {"reply_to": topic_id} if topic_id else {}
+            new_msgs = await self._client.get_messages(
+                message.chat_id, min_id=anchor, limit=self.HISTORY_DELTA_CAP, **kwargs,
+            )
+        except Exception as e:
+            return f"[Не удалось получить историю: {e}]", True, None
+
+        newest_id = max([message.id] + [m.id for m in new_msgs])
+        if not new_msgs:
+            return "", True, (key, newest_id)
+        try:
+            anchor_msgs = await self._client.get_messages(message.chat_id, ids=[anchor])
+            anchor_msg = anchor_msgs[0] if anchor_msgs and anchor_msgs[0] else None
+        except Exception:
+            anchor_msg = None
+        ordered = ([anchor_msg] if anchor_msg else []) + list(reversed(new_msgs))
+        return await self._format_messages(ordered), True, (key, newest_id)
+
+    def _commit_trigger_context_anchor(self, pending):
+        if pending:
+            key, newest_id = pending
+            self.db.set("CodexAsk", key, newest_id)
+
+    async def _build_trigger_chat_context(self, trig, message):
         """Fresh trigger context without advancing the user's .xask cursor."""
         reply_id = getattr(message, "reply_to_msg_id", None)
         reply_text = await self._get_reply_text(message)
         reply_file = await self._get_reply_file(message)
-        history = await self._get_chat_history(message, limit=15)
+        history, is_delta, pending_anchor = await self._get_trigger_chat_history_delta(trig, message)
         now_str = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
         parts = [f"Текущее время: {now_str}"]
         if history:
-            parts.append(f"Свежая история чата:\n{history}")
+            label = "Новые сообщения с прошлого срабатывания" if is_delta else "История чата"
+            parts.append(f"{label}:\n{history}")
         if reply_id:
             anchor = f"Реплай на сообщение (id={reply_id})"
             if reply_text and reply_file:
@@ -1294,7 +1341,7 @@ class CodexAsk(loader.Module):
                 parts.append(f"{anchor}. {reply_file}")
             else:
                 parts.append(f"{anchor}.")
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), pending_anchor
 
     def _clear_history_anchors(self, chat_id):
         """A reset covers every forum-topic cursor belonging to the chat.
@@ -2835,9 +2882,9 @@ class CodexAsk(loader.Module):
         # against repeats of themselves.
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
-            chat_context = (
-                await self._build_trigger_chat_context(message)
-                if trig.get("include_chat_context") else None
+            chat_context, context_anchor = (
+                await self._build_trigger_chat_context(trig, message)
+                if trig.get("include_chat_context") else (None, None)
             )
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
@@ -2852,6 +2899,7 @@ class CodexAsk(loader.Module):
                 # requester for trigger fallbacks. Fail closed instead of
                 # handing an autonomous trigger to an unsafe implementation.
                 return
+            self._commit_trigger_context_anchor(context_anchor)
             answer = None
             for _ in range(60):
                 await asyncio.sleep(1)
@@ -3051,9 +3099,9 @@ class CodexAsk(loader.Module):
         # access, e.g. bridge.py's persistent-process migration notes).
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
-            chat_context = (
-                await self._build_trigger_chat_context(message)
-                if trig.get("include_chat_context") else None
+            chat_context, context_anchor = (
+                await self._build_trigger_chat_context(trig, message)
+                if trig.get("include_chat_context") else (None, None)
             )
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
@@ -3068,6 +3116,7 @@ class CodexAsk(loader.Module):
                 # requester for trigger fallbacks. Fail closed instead of
                 # handing an autonomous trigger to an unsafe implementation.
                 return
+            self._commit_trigger_context_anchor(context_anchor)
             answer, thoughts = await self._poll_result_silent(req_id)
             if answer is None or self._backend_failed(answer):
                 await self._notify_topic(

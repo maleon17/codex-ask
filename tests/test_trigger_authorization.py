@@ -94,15 +94,18 @@ codex_ask = _load_codex_ask()
 class FakeDB:
     def __init__(self, triggers=None):
         self.triggers = triggers or {}
+        self.values = {}
 
     def get(self, namespace, key, default=None):
         if namespace == "ClaudeAsk" and key == "triggers":
             return self.triggers
-        return default
+        return self.values.get((namespace, key), default)
 
     def set(self, namespace, key, value):
         if namespace == "ClaudeAsk" and key == "triggers":
             self.triggers = value
+        else:
+            self.values[(namespace, key)] = value
 
 
 class FakeMessage:
@@ -133,12 +136,28 @@ def make_module(triggers=None):
     instance._agent_trigger_locks = {}
     instance._agent_turn_sent = {}
     instance._notify_topic = AsyncMock()
-    instance._build_trigger_chat_context = AsyncMock(return_value="fresh trigger history")
+    instance._build_trigger_chat_context = AsyncMock(
+        return_value=("fresh trigger history", ("trigger_context_seen_test", 1))
+    )
     return instance
 
 
 def test_legacy_external_loader_adapter_returns_codex_module():
     assert isinstance(codex_ask.register("external-test"), codex_ask.loader.Module)
+
+
+def test_trigger_delta_anchor_is_separate_from_interactive_history():
+    bot = make_module()
+    message = FakeMessage()
+    trig = trigger("trigger-history")
+    interactive_key = f"last_seen_id_{CURRENT_CHAT_ID}"
+    bot.db.set("CodexAsk", interactive_key, 50)
+    trigger_key = bot._trigger_context_anchor_key(trig, message)
+
+    bot._commit_trigger_context_anchor((trigger_key, 77))
+
+    assert bot.db.get("CodexAsk", interactive_key) == 50
+    assert bot.db.get("CodexAsk", trigger_key) == 77
 
 
 def trigger(trigger_id="trigger-1", **extra):
