@@ -127,3 +127,31 @@ def test_reset_clears_every_topic_cursor_for_the_chat():
     assert ns["last_seen_id_1_77"] is None
     assert ns["last_seen_id_12"] == 40
     assert ns["unrelated"] == "x"
+
+
+
+class HistoryMsg:
+    def __init__(self, msg_id, text, reply_to_msg_id=None, sender_id=1):
+        self.id = msg_id
+        self.sender_id = sender_id
+        self.raw_text = text
+        self.date = None
+        self.reply_to_msg_id = reply_to_msg_id
+        self.document = self.photo = self.sticker = None
+        self.gif = self.video = self.voice = self.video_note = self.poll = None
+
+
+def test_format_messages_marks_which_message_a_reply_answers():
+    """A history line otherwise flattens every reply thread into one
+    indistinguishable stream -- only the CURRENT triggering message got a
+    reply annotation, nothing shown for messages read in bulk."""
+    bot = make_module()
+    msgs = [
+        HistoryMsg(10, "root question"),
+        HistoryMsg(11, "unrelated aside"),
+        HistoryMsg(12, "the actual answer", reply_to_msg_id=10),
+    ]
+    lines = run(bot._format_messages(msgs)).splitlines()
+    assert "id=10" in lines[0] and "реплай" not in lines[0]
+    assert "id=11" in lines[1] and "реплай" not in lines[1]
+    assert "id=12" in lines[2] and "реплай на id=10" in lines[2]

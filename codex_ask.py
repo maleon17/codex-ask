@@ -1000,7 +1000,16 @@ class CodexAsk(loader.Module):
                         ts = m.date.astimezone().strftime("%d.%m %H:%M") + " "
                     except Exception:
                         ts = ""
-                pfx = f"[id={m.id}, {ts}{name}]: "
+                # A bare history line otherwise carries no thread structure
+                # at all -- in a chat with several interleaved reply
+                # branches, that flattens genuinely different conversations
+                # into one indistinguishable stream. Only the id, not the
+                # replied-to text itself (already present earlier in the
+                # same batch, or outside its range entirely) -- keeps this
+                # cheap and avoids duplicating content.
+                rid = getattr(m, "reply_to_msg_id", None)
+                reply_note = f", реплай на id={rid}" if rid else ""
+                pfx = f"[id={m.id}{reply_note}, {ts}{name}]: "
                 # Media checked BEFORE plain text now -- a CAPTIONED photo/
                 # document/voice/sticker has non-empty m.text too (the
                 # caption), and the old `if txt.strip(): ... elif m.photo:
