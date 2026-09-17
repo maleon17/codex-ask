@@ -811,7 +811,9 @@ class ChatSession:
                 persona = load_persona(self.instance_id)
                 if str(self.chat_id) in NOMATS_CHAT_IDS:
                     persona += NO_MATS_RULE
-                prompt = f"{persona}\n\nЗапрос пользователя:\n{question}"
+                chat_context = str(request.get("chat_context") or "").strip()
+                context_prefix = f"\n\nКонтекст текущего чата:\n{chat_context}" if chat_context else ""
+                prompt = f"{persona}{context_prefix}\n\nЗапрос пользователя:\n{question}"
                 model = CODEX_MODEL
             params = {
                 "threadId": thread_id,

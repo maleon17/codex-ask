@@ -175,10 +175,14 @@ def test_trigger_turn_resumes_the_interactive_chat_thread(monkeypatch, tmp_path)
     session.handle({
         "request_id": "trigger", "mode": "chat", "resume_session": True,
         "question": "automatic reply", "requester_id": "trigger:rule",
+        "chat_context": "[id=1, Анна]: Джарвис, ты тут?",
     })
 
     methods = [method for method, _, _ in session.client.calls]
     assert methods == ["thread/resume", "turn/start"]
+    prompt = session.client.calls[1][1]["input"][0]["text"]
+    assert "Контекст текущего чата" in prompt
+    assert "Джарвис, ты тут?" in prompt
 
 
 def load_mcp(monkeypatch, tmp_path):

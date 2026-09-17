@@ -133,6 +133,7 @@ def make_module(triggers=None):
     instance._agent_trigger_locks = {}
     instance._agent_turn_sent = {}
     instance._notify_topic = AsyncMock()
+    instance._build_trigger_chat_context = AsyncMock(return_value="fresh trigger history")
     return instance
 
 
@@ -177,6 +178,7 @@ def test_trigger_agent_and_reply_enqueue_non_owner_context(monkeypatch, action):
     assert requester_id != OWNER_ID
     assert not requester_id.isdigit()
     assert kwargs["resume_session"] is True
+    assert kwargs["chat_context"] == "fresh trigger history"
 
 
 def test_reply_trigger_does_not_duplicate_successful_send_message(monkeypatch):

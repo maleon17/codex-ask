@@ -36,9 +36,11 @@ def test_trigger_enqueue_requests_the_current_chat_session(monkeypatch):
 
     assert bot._enqueue(
         "trigger question", "7", "request-7", requester_id="trigger:1",
-        resume_session=True,
+        resume_session=True, chat_context="recent messages",
     )[0]
-    assert json.loads(captured[0].data)["resume_session"] is True
+    payload = json.loads(captured[0].data)
+    assert payload["resume_session"] is True
+    assert payload["chat_context"] == "recent messages"
 
 
 def test_codex_upload_boundary_is_absent_from_file_bytes(monkeypatch):

@@ -1274,6 +1274,28 @@ class CodexAsk(loader.Module):
             key, newest_id = pending
             self.db.set("CodexAsk", key, newest_id)
 
+    async def _build_trigger_chat_context(self, message):
+        """Fresh trigger context without advancing the user's .xask cursor."""
+        reply_id = getattr(message, "reply_to_msg_id", None)
+        reply_text = await self._get_reply_text(message)
+        reply_file = await self._get_reply_file(message)
+        history = await self._get_chat_history(message, limit=15)
+        now_str = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+        parts = [f"Текущее время: {now_str}"]
+        if history:
+            parts.append(f"Свежая история чата:\n{history}")
+        if reply_id:
+            anchor = f"Реплай на сообщение (id={reply_id})"
+            if reply_text and reply_file:
+                parts.append(f"{anchor} (с подписью):\n{reply_text}\n{reply_file}")
+            elif reply_text:
+                parts.append(f"{anchor}:\n{reply_text}")
+            elif reply_file:
+                parts.append(f"{anchor}. {reply_file}")
+            else:
+                parts.append(f"{anchor}.")
+        return "\n\n".join(parts)
+
     def _clear_history_anchors(self, chat_id):
         """A reset covers every forum-topic cursor belonging to the chat.
 
@@ -1294,7 +1316,7 @@ class CodexAsk(loader.Module):
 
     def _enqueue(
         self, question, chat_id, req_id, mode="chat", topic_id=None,
-        exclude_id=None, requester_id=None, resume_session=False,
+        exclude_id=None, requester_id=None, resume_session=False, chat_context=None,
     ):
         try:
             payload = {
@@ -1320,6 +1342,11 @@ class CodexAsk(loader.Module):
                 # from its existing (instance_id, chat_id) index instead of
                 # creating an autonomous context.
                 payload["resume_session"] = True
+            if chat_context:
+                # Telegram can only be read by this userbot process. Pass a
+                # fresh, already-formatted snapshot to the watcher, which
+                # otherwise has only the Codex thread and queue item.
+                payload["chat_context"] = chat_context
             data = json.dumps(payload).encode()
             with self._relay_open(urllib.request.Request(
                     f"{BACKEND_URL}/xask", data=data,
@@ -2804,12 +2831,14 @@ class CodexAsk(loader.Module):
         # against repeats of themselves.
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
+            chat_context = await self._build_trigger_chat_context(message)
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
                 question, message.chat_id, req_id, "chat",
                 topic_id=self._topic_of(message),
                 requester_id=self._trigger_requester_id(trig, message),
                 resume_session=True,
+                chat_context=chat_context,
             )
             if not enqueued:
                 # The sibling backend may still use the legacy owner
@@ -3015,12 +3044,14 @@ class CodexAsk(loader.Module):
         # access, e.g. bridge.py's persistent-process migration notes).
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
+            chat_context = await self._build_trigger_chat_context(message)
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
                 prompt, message.chat_id, req_id, "chat",
                 topic_id=self._topic_of(message),
                 requester_id=self._trigger_requester_id(trig, message),
                 resume_session=True,
+                chat_context=chat_context,
             )
             if not enqueued:
                 # The sibling backend may still use the legacy owner
