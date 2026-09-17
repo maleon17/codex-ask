@@ -797,7 +797,12 @@ class ChatSession:
                     pass
         client = self.client if mode != "classify" else self._new_client(restricted=True)
         try:
-            thread_id = self._ensure_thread(mode == "chat", client, generation)
+            # Triggered turns explicitly opt into the same persistent session
+            # as the user's .xask conversation.  Keep the old mode behaviour
+            # for normal chat requests, while making the session contract
+            # explicit in the queue protocol.
+            persistent = mode == "chat" or bool(request.get("resume_session"))
+            thread_id = self._ensure_thread(persistent, client, generation)
             state.thread_id = thread_id
             if mode == "classify":
                 prompt = f"{CLASSIFY_PROMPT}\n\n{question}"

@@ -176,6 +176,7 @@ def test_trigger_agent_and_reply_enqueue_non_owner_context(monkeypatch, action):
     assert requester_id == "trigger:trigger-1"
     assert requester_id != OWNER_ID
     assert not requester_id.isdigit()
+    assert kwargs["resume_session"] is True
 
 
 def test_reply_trigger_does_not_duplicate_successful_send_message(monkeypatch):

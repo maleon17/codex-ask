@@ -1294,7 +1294,7 @@ class CodexAsk(loader.Module):
 
     def _enqueue(
         self, question, chat_id, req_id, mode="chat", topic_id=None,
-        exclude_id=None, requester_id=None,
+        exclude_id=None, requester_id=None, resume_session=False,
     ):
         try:
             payload = {
@@ -1314,6 +1314,12 @@ class CodexAsk(loader.Module):
                 payload["message_id"] = exclude_id
             if requester_id is not None:
                 payload["requester_id"] = requester_id
+            if resume_session:
+                # Trigger turns must join the persistent interactive session
+                # for this instance/chat.  The watcher resolves that session
+                # from its existing (instance_id, chat_id) index instead of
+                # creating an autonomous context.
+                payload["resume_session"] = True
             data = json.dumps(payload).encode()
             with self._relay_open(urllib.request.Request(
                     f"{BACKEND_URL}/xask", data=data,
@@ -2803,6 +2809,7 @@ class CodexAsk(loader.Module):
                 question, message.chat_id, req_id, "chat",
                 topic_id=self._topic_of(message),
                 requester_id=self._trigger_requester_id(trig, message),
+                resume_session=True,
             )
             if not enqueued:
                 # The sibling backend may still use the legacy owner
@@ -3013,6 +3020,7 @@ class CodexAsk(loader.Module):
                 prompt, message.chat_id, req_id, "chat",
                 topic_id=self._topic_of(message),
                 requester_id=self._trigger_requester_id(trig, message),
+                resume_session=True,
             )
             if not enqueued:
                 # The sibling backend may still use the legacy owner

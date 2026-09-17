@@ -26,6 +26,21 @@ def test_codex_client_enqueues_with_bearer_token(monkeypatch):
     assert captured[0].get_header("Authorization") == "Bearer codex-secret"
 
 
+def test_trigger_enqueue_requests_the_current_chat_session(monkeypatch):
+    """Triggered turns must opt into the persistent chat session explicitly."""
+    import json
+
+    bot = make_module()
+    captured = []
+    monkeypatch.setattr(bot, "_relay_open", lambda request, *_: captured.append(request) or _Response())
+
+    assert bot._enqueue(
+        "trigger question", "7", "request-7", requester_id="trigger:1",
+        resume_session=True,
+    )[0]
+    assert json.loads(captured[0].data)["resume_session"] is True
+
+
 def test_codex_upload_boundary_is_absent_from_file_bytes(monkeypatch):
     """S03: a collision in the first random boundary is retried."""
     bot = make_module()

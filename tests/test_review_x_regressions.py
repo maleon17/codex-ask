@@ -151,6 +151,36 @@ def test_tool_context_is_per_turn_and_forwards_topic_and_placeholder(monkeypatch
     ]
 
 
+def test_trigger_turn_resumes_the_interactive_chat_thread(monkeypatch, tmp_path):
+    """A trigger must continue the chat's thread, not start an isolated one."""
+    w = isolated_worker(monkeypatch, tmp_path)
+
+    class ResumeClient(FakeClient):
+        def request(self, method, params=None, timeout=None):
+            self.calls.append((method, params, timeout))
+            if method == "thread/resume":
+                assert params["threadId"] == "interactive-thread"
+                return {"thread": {"id": "interactive-thread"}}
+            if method == "turn/start":
+                self.notification("turn/completed", {
+                    "threadId": "interactive-thread", "turn": {"id": "trigger-turn"},
+                })
+                return {"turn": {"id": "trigger-turn"}}
+            raise AssertionError(method)
+
+    monkeypatch.setattr(w, "AppServerClient", ResumeClient)
+    index = w.SessionIndex(w.SESSIONS_FILE)
+    index.set("instance", "42", "interactive-thread")
+    session = w.ChatSession("instance", "42", index)
+    session.handle({
+        "request_id": "trigger", "mode": "chat", "resume_session": True,
+        "question": "automatic reply", "requester_id": "trigger:rule",
+    })
+
+    methods = [method for method, _, _ in session.client.calls]
+    assert methods == ["thread/resume", "turn/start"]
+
+
 def load_mcp(monkeypatch, tmp_path):
     class Server:
         def __init__(self, name):
@@ -188,9 +218,9 @@ def test_mcp_reads_topic_and_excluded_message_from_dynamic_turn_context(monkeypa
     module.read_history()
 
     assert seen == [
-        ("read_history", {"count": 50, "direction": None, "reply_id": None,
+        ("read_history", {"count": 50, "direction": None, "reply_id": None, "until_id": None,
                           "topic_id": 11, "exclude_id": 101, "chat": ""}),
-        ("read_history", {"count": 50, "direction": None, "reply_id": None,
+        ("read_history", {"count": 50, "direction": None, "reply_id": None, "until_id": None,
                           "topic_id": 22, "exclude_id": 202, "chat": ""}),
     ]
 
