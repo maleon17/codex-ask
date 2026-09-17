@@ -624,12 +624,31 @@ class ChatSession:
         env["CODEX_TELEGRAM_CHAT_ID"] = str(chat_id)
         env["CODEX_TELEGRAM_INSTANCE_ID"] = str(instance_id)
         env["CODEX_TELEGRAM_CONTEXT_DIR"] = str(TOOL_CONTEXT_DIR)
-        mcp_env_override = (
-            "mcp_servers.telegram_actions.env="
-            '{CODEX_TELEGRAM_CHAT_ID="' + str(chat_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
-            'CODEX_TELEGRAM_INSTANCE_ID="' + str(instance_id).replace("\\", "\\\\").replace('"', '\\"') + '",'
-            'CODEX_TELEGRAM_CONTEXT_DIR="' + str(TOOL_CONTEXT_DIR).replace("\\", "\\\\").replace('"', '\\"') + '"}'
-        )
+
+        def _toml_str(value):
+            return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        # Same "-c mcp_servers.<name>.env=" override as the three vars
+        # above, and for the same reason (Codex does not forward the
+        # app-server's own process env to spawned MCP servers -- see the
+        # comment above). telegram_actions_mcp.py needs its own relay
+        # bearer token (JARVIS_RELAY_TOKEN, or JARVIS_RELAY_TOKENS_JSON
+        # when this env variable is set to serve several instances) to
+        # authenticate every /tool_call it makes; without it here the
+        # relay's S01 auth rejects every tool call from this process,
+        # regardless of what is set on the watcher's own environment.
+        mcp_env_entries = {
+            "CODEX_TELEGRAM_CHAT_ID": chat_id,
+            "CODEX_TELEGRAM_INSTANCE_ID": instance_id,
+            "CODEX_TELEGRAM_CONTEXT_DIR": TOOL_CONTEXT_DIR,
+        }
+        for key in ("JARVIS_RELAY_TOKEN", "JARVIS_RELAY_TOKENS_JSON", "JARVIS_RELAY_URL"):
+            value = os.environ.get(key)
+            if value:
+                mcp_env_entries[key] = value
+        mcp_env_override = "mcp_servers.telegram_actions.env={" + ",".join(
+            f"{key}={_toml_str(value)}" for key, value in mcp_env_entries.items()
+        ) + "}"
         self._client_env = env
         self._mcp_env_override = mcp_env_override
         self.client = self._new_client()
