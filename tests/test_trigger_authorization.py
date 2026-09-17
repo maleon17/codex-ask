@@ -147,6 +147,7 @@ def trigger(trigger_id="trigger-1", **extra):
         "kind": "keyword",
         "action": "agent",
         "instruction": "process the incoming message",
+        "include_chat_context": True,
     }
     value.update(extra)
     return value
@@ -342,6 +343,7 @@ def test_agent_trigger_report_destination_is_validated_and_persisted():
     })
     assert error is None
     assert trigger_spec["report_to"] == "notify"
+    assert trigger_spec["include_chat_context"] is False
 
     _, error = bot._build_trigger({
         "kind": "keyword", "value": ["ping"], "action": "agent",

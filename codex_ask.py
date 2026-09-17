@@ -2352,6 +2352,10 @@ class CodexAsk(loader.Module):
             # other participant would burn a full agentic call and pollute
             # the resumed session's context with irrelevant noise.
             "only_senders": [str(s) for s in (only_senders or [])],
+            # An agent/reply trigger normally sees just the message that
+            # matched.  Opting in supplies the same fresh chat context as an
+            # interactive .xask without advancing its history cursor.
+            "include_chat_context": bool(spec.get("include_chat_context")),
             # action=confirm only: extra people (id or @username) allowed to
             # press THIS trigger's Удалить/Оставить buttons, on top of the
             # owner (always) and -- if target routed the card externally --
@@ -2831,7 +2835,10 @@ class CodexAsk(loader.Module):
         # against repeats of themselves.
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
-            chat_context = await self._build_trigger_chat_context(message)
+            chat_context = (
+                await self._build_trigger_chat_context(message)
+                if trig.get("include_chat_context") else None
+            )
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
                 question, message.chat_id, req_id, "chat",
@@ -3044,7 +3051,10 @@ class CodexAsk(loader.Module):
         # access, e.g. bridge.py's persistent-process migration notes).
         async with self._agent_trigger_lock(message.chat_id):
             self._agent_turn_sent[str(message.chat_id)] = False
-            chat_context = await self._build_trigger_chat_context(message)
+            chat_context = (
+                await self._build_trigger_chat_context(message)
+                if trig.get("include_chat_context") else None
+            )
             req_id = str(uuid.uuid4())
             enqueued, _ = await self._enqueue_async(
                 prompt, message.chat_id, req_id, "chat",
