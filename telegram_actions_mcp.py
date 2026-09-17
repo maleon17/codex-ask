@@ -457,7 +457,8 @@ def search_chat(keyword: str, limit: int = 20, chat: str = "") -> str:
 
 
 @mcp.tool()
-def read_history(count: int = 50, direction: str = "", reply_id: int = 0, chat: str = "") -> str:
+def read_history(count: int = 50, direction: str = "", reply_id: int = 0,
+                 until_id: int = 0, chat: str = "") -> str:
     """Прислать больше сообщений истории чата -- то, что уже дали в начале
     разговора, может быть неполным (только то, что накопилось с прошлого
     ответа). Используй если реально не хватает контекста, а не просто на
@@ -469,13 +470,18 @@ def read_history(count: int = 50, direction: str = "", reply_id: int = 0, chat: 
     -- используй когда явно просят посмотреть вокруг конкретного
     выделенного сообщения), или 'today' -- ВСЕ сообщения чата с начала
     текущих суток по местному времени (используй на запрос вроде "прочитай
-    всё за сегодня", count и reply_id при этом не нужны). chat --
+    всё за сегодня", count и reply_id при этом не нужны). Если результат
+    содержит [ИСТОРИЯ ЕЩЁ НЕ ПРОЧИТАНА], ОБЯЗАТЕЛЬНО сразу вызови этот tool
+    ещё раз с указанными direction/reply_id/until_id, пока метка не исчезнет:
+    until_id фиксирует верхнюю границу исходной выборки, чтобы новые
+    сообщения не подмешались в историю. chat --
     id/@username/точное название чата; пусто/'this' = ТЕКУЩИЙ чат (по
     умолчанию) -- можно читать историю ЛЮБОГО другого чата из
     существующих диалогов, не только текущего (например "глянь что там в
     переписке с папой")."""
     return _call_tool("read_history", {
         "count": count, "direction": direction or None, "reply_id": reply_id or None,
+        "until_id": until_id or None,
         "topic_id": _current_topic_id(), "exclude_id": _current_exclude_msg_id(), "chat": chat,
     })
 

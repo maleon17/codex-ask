@@ -335,6 +335,11 @@ class CodexAsk(loader.Module):
     # set this on an instance outside tests that shadow it directly on
     # their own bot object).
     TELEGRAM_TEXT_LIMIT = TELEGRAM_TEXT_LIMIT
+    # A history page contains at most this many items that require network
+    # I/O (download + image upload or voice transcription). The next page
+    # starts immediately after it, so no media is replaced with a stub.
+    HISTORY_MEDIA_BATCH_SIZE = 3
+    READ_HISTORY_TEXT_PAGE_LIMIT = 24000
 
     # -- Forum topics (Phase 1 infra) -----------------------------------------
 
@@ -958,6 +963,73 @@ class CodexAsk(loader.Module):
         except Exception as e:
             return f"Ошибка поиска: {e}"
 
+    @staticmethod
+    def _history_media_kind(message):
+        document = getattr(message, "document", None)
+        mime = (getattr(document, "mime_type", "") or "") if document else ""
+        if document and mime.startswith("audio/"):
+            return "audio"
+        if getattr(message, "photo", None):
+            return "photo"
+        if getattr(message, "sticker", None):
+            return "sticker"
+        if getattr(message, "voice", None):
+            return "voice"
+        return None
+
+    def _history_page(self, messages):
+        """Return a chronological prefix whose expensive work fits one MCP call."""
+        selected = []
+        media_count = 0
+        text_size = 0
+        for message in messages:
+            media_cost = 1 if self._history_media_kind(message) else 0
+            raw_text = getattr(message, "raw_text", "") or ""
+            estimated_size = min(max(len(raw_text), 80), 4000)
+            if selected and (
+                media_count + media_cost > self.HISTORY_MEDIA_BATCH_SIZE
+                or text_size + estimated_size > self.READ_HISTORY_TEXT_PAGE_LIMIT
+            ):
+                break
+            selected.append(message)
+            media_count += media_cost
+            text_size += estimated_size
+        return selected
+
+    async def _prefetch_history_media(self, messages):
+        """Fetch a page's media concurrently, retaining message order in caller."""
+        semaphore = asyncio.Semaphore(self.HISTORY_MEDIA_BATCH_SIZE)
+
+        async def fetch(message, kind):
+            try:
+                async with semaphore:
+                    if kind == "audio":
+                        data = await self._client.download_file(message.document, bytes)
+                        return await self._transcribe_voice(data) if data else "[не удалось загрузить]"
+                    if kind == "photo":
+                        data = await self._client.download_file(message.photo, bytes)
+                        return await self._upload_to_lightrag(data, f"photo_{message.id}.jpg") if data else None
+                    if kind == "sticker":
+                        return await self._view_sticker(message)
+                    if kind == "voice":
+                        data = await self._client.download_file(message.voice, bytes)
+                        return await self._transcribe_voice(data) if data else "[не удалось загрузить]"
+            except Exception:
+                return None
+
+        tasks = [
+            (message.id, asyncio.create_task(fetch(message, kind)))
+            for message in messages
+            if (kind := self._history_media_kind(message))
+        ]
+        if not tasks:
+            return {}
+        values = await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+        return {
+            message_id: None if isinstance(value, Exception) else value
+            for (message_id, _), value in zip(tasks, values)
+        }
+
     async def _format_messages(self, msgs, name_cache=None, char_limit=300):
         """msgs must already be chronological (oldest first). Shared by the
         full-history fetch, the rolling delta and the reply-anchored range
@@ -974,6 +1046,10 @@ class CodexAsk(loader.Module):
         a call whose entire point is reading specific messages in full."""
         if name_cache is None:
             name_cache = {}
+        # All actual downloads/transcriptions for this already-bounded page
+        # run together. Formatting below still walks the messages in their
+        # original order, so concurrent I/O cannot scramble the dialogue.
+        media = await self._prefetch_history_media(msgs)
         lines = []
         for m in msgs:
             # Each message gets its OWN try/except -- one bad message (a
@@ -1037,7 +1113,7 @@ class CodexAsk(loader.Module):
                     # "📄 filename", indistinguishable from a real document.
                     mime = getattr(m.document, "mime_type", "") or ""
                     if mime.startswith("audio/"):
-                        transcript = await self._transcribe_voice(await self._client.download_file(m.document, bytes))
+                        transcript = media.get(m.id) or "[не удалось обработать]"
                         txt = pfx + f"🎤 Аудиофайл, расшифровка: {transcript}{caption}"
                     else:
                         txt = pfx + f"📄 {fn or 'файл'}{caption}"
@@ -1053,19 +1129,17 @@ class CodexAsk(loader.Module):
                     # here, client-side, before Claude ever sees the
                     # question text, so there's no earlier point to
                     # intercept an opt-out anyway).
-                    data = await self._client.download_file(m.photo, bytes)
-                    path = await self._upload_to_lightrag(data, f"photo_{m.id}.jpg") if data else None
+                    path = media.get(m.id)
                     txt = pfx + (f"📷 Фото: {path}{caption}" if path else f"📷 Фото (не удалось загрузить){caption}")
                 elif m.sticker:
-                    path = await self._view_sticker(m)
+                    path = media.get(m.id)
                     txt = pfx + (f"🎭 Стикер: {path}{caption}" if path else f"🎭 Стикер{caption}")
                 elif m.gif:
                     txt = pfx + f"🎬 GIF{caption}"
                 elif m.video:
                     txt = pfx + f"🎥 Видео{caption}"
                 elif m.voice:
-                    data = await self._client.download_file(m.voice, bytes)
-                    transcript = await self._transcribe_voice(data) if data else "[не удалось загрузить]"
+                    transcript = media.get(m.id) or "[не удалось обработать]"
                     txt = pfx + f"🎤 Голосовое, расшифровка: {transcript}{caption}"
                 elif m.video_note:
                     txt = pfx + f"🎥 Кружок{caption}"
@@ -3553,7 +3627,7 @@ class CodexAsk(loader.Module):
                     else:
                         result = await self._read_history_action(
                             target_chat_id, cnt=args.get("count") or 50, direction=args.get("direction"),
-                            reply_id=args.get("reply_id"),
+                            reply_id=args.get("reply_id"), until_id=args.get("until_id"),
                             topic_id=args.get("topic_id") if same_chat else None,
                             exclude_id=args.get("exclude_id") if same_chat else None,
                         )
@@ -3577,6 +3651,30 @@ class CodexAsk(loader.Module):
     # messages into one answer -- same idea as HISTORY_DELTA_CAP above,
     # just for the "today" direction instead of the delta anchor.
     READ_HISTORY_TODAY_CAP = 500
+
+    async def _render_history_page(self, ordered, heading, direction=None, until_id=None):
+        """Format one bounded chronological page and tell the agent its cursor."""
+        page = self._history_page(ordered)
+        history = await self._format_messages(page, char_limit=4000)
+        if len(page) == len(ordered):
+            return f"{heading}:\n\n{history}"
+
+        remaining = len(ordered) - len(page)
+        if direction == "before":
+            continuation = (
+                f'read_history(count={remaining}, direction="before", '
+                f'reply_id={page[0].id})'
+            )
+        else:
+            continuation = (
+                f'read_history(count={remaining}, direction="after", '
+                f'reply_id={page[-1].id}, until_id={until_id or ordered[-1].id})'
+            )
+        return (
+            f"{heading}; показана часть {len(page)} из {len(ordered)}:\n\n{history}\n\n"
+            "[ИСТОРИЯ ЕЩЁ НЕ ПРОЧИТАНА. Немедленно вызови "
+            f"{continuation}. Не отвечай пользователю и не делай выводов, пока не дочитаешь все части.]"
+        )
 
     async def _read_history_today(self, chat_id, topic_id=None, exclude_id=None):
         """read_history's direction='today' handler: every message in the
@@ -3619,11 +3717,15 @@ class CodexAsk(loader.Module):
         collected = collected[: self.READ_HISTORY_TODAY_CAP]
         if exclude_id is not None:
             collected = [m for m in collected if m.id != exclude_id]
-        hist = await self._format_messages(list(reversed(collected)), char_limit=4000)
+        ordered = list(reversed(collected))
         capped_note = " (обрезано по лимиту)" if len(collected) >= self.READ_HISTORY_TODAY_CAP else ""
-        return f"История за сегодня ({len(collected)}){capped_note}:\n\n{hist}"
+        return await self._render_history_page(
+            ordered, f"История за сегодня ({len(ordered)}){capped_note}",
+            until_id=ordered[-1].id if ordered else None,
+        )
 
-    async def _read_history_action(self, chat_id, cnt=50, direction=None, reply_id=None, topic_id=None, exclude_id=None):
+    async def _read_history_action(self, chat_id, cnt=50, direction=None, reply_id=None,
+                                   until_id=None, topic_id=None, exclude_id=None):
         """Real read_history MCP tool handler (was the READ_HISTORY text
         marker's default+after/before branches, merged into one function
         now that there's no separate live `message` to branch the two old
@@ -3651,8 +3753,16 @@ class CodexAsk(loader.Module):
                     # assumed. Result already comes back oldest-of-range
                     # first, matching this codebase's chronological
                     # convention -- no extra reversal needed.
+                    until_id = int(until_id) if until_id else None
+                    if until_id and until_id <= int(reply_id):
+                        return "Некорректный курсор истории: until_id должен быть после reply_id."
+                    # Telegram's max_id is an exclusive filter. It keeps a
+                    # continued scan inside the original snapshot instead
+                    # of accidentally absorbing messages that arrived later.
+                    after_kwargs = {"max_id": until_id + 1} if until_id else {}
                     msgs = await self._client.get_messages(
-                        int(chat_id), min_id=reply_id, limit=cnt, reverse=True, **topic_kwargs,
+                        int(chat_id), min_id=reply_id, limit=cnt, reverse=True,
+                        **after_kwargs, **topic_kwargs,
                     )
                     ordered = list(msgs)
                 else:
@@ -3669,15 +3779,11 @@ class CodexAsk(loader.Module):
                 return f"Не удалось получить сообщения: {e}"
             if exclude_id is not None:
                 ordered = [m for m in ordered if m.id != exclude_id]
-            # char_limit=4000 (vs the 300 used for casual rolling context):
-            # this whole branch only runs when Claude explicitly asked to
-            # read specific messages in full -- capping at a preview length
-            # here would defeat the entire point of the request (this is
-            # the bug that made a long reminder/document message show up
-            # as just its title).
-            hist = await self._format_messages(ordered, char_limit=4000)
             where = "после" if direction == "after" else "до"
-            return f"Сообщения {where} реплая (id={reply_id}), {cnt} шт.:\n\n{hist}"
+            return await self._render_history_page(
+                ordered, f"Сообщения {where} реплая (id={reply_id}), {len(ordered)} шт.",
+                direction=direction, until_id=until_id,
+            )
         try:
             topic_kwargs = {"reply_to": topic_id} if topic_id else {}
             msgs = await self._client.get_messages(int(chat_id), limit=cnt, **topic_kwargs)
@@ -3685,8 +3791,10 @@ class CodexAsk(loader.Module):
             return f"Не удалось получить историю: {e}"
         if exclude_id is not None:
             msgs = [m for m in msgs if m.id != exclude_id]
-        hist = await self._format_messages(list(reversed(msgs)), char_limit=4000)
-        return f"История ({cnt}):\n\n{hist}"
+        ordered = list(reversed(msgs))
+        return await self._render_history_page(
+            ordered, f"История ({len(ordered)})", until_id=ordered[-1].id if ordered else None,
+        )
 
     async def _forward_message_action(self, chat_arg, message_id, to_arg, chat_id):
         """Real forward_message MCP tool handler. Native Telegram forward
