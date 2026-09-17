@@ -843,6 +843,39 @@ class CodexAsk(loader.Module):
         except Exception as e:
             return f"[Не удалось расшифровать голосовое: {e}]"
 
+    async def _transcribe_video_note(self, data: bytes) -> str:
+        """Extract a circle video's audio track, then use the normal Voxtral path."""
+        if not data:
+            return "[не удалось загрузить кружок]"
+        workdir = tempfile.mkdtemp(prefix="jarvis_video_note_")
+        source = os.path.join(workdir, "video_note.mp4")
+        audio = os.path.join(workdir, "audio.wav")
+        try:
+            with open(source, "wb") as handle:
+                handle.write(data)
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", source, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", audio,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                return "[извлечение аудио из кружка превысило 30 секунд]"
+            if process.returncode or not os.path.exists(audio):
+                detail = stderr.decode("utf-8", "replace").strip()[:300]
+                return f"[не удалось извлечь аудио из кружка: {detail or 'ffmpeg error'}]"
+            with open(audio, "rb") as handle:
+                return await self._transcribe_voice(handle.read(), filename="video_note.wav")
+        except FileNotFoundError:
+            return "[на userbot отсутствует ffmpeg для кружка]"
+        except Exception as e:
+            return f"[не удалось обработать кружок: {e}]"
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
     async def _get_reply_file(self, message):
         """Returns context text to prepend to the question. Every file type
         (text included) is downloaded and uploaded to lightrag up front,
@@ -902,7 +935,9 @@ class CodexAsk(loader.Module):
                 sz = getattr(msg.video, "size", 0)
                 return f"[Видео ({sz // 1024}KB) — просмотр видео пока не поддержан]"
             if msg.video_note:
-                return "[Видео-кружок — не поддержан]"
+                data = await self._client.download_file(msg.video_note, bytes)
+                transcript = await self._transcribe_video_note(data)
+                return f"[Видео-кружок, расшифровка]: {transcript}"
             if msg.voice:
                 data = await self._client.download_file(msg.voice, bytes)
                 transcript = await self._transcribe_voice(data)
@@ -975,6 +1010,8 @@ class CodexAsk(loader.Module):
             return "sticker"
         if getattr(message, "voice", None):
             return "voice"
+        if getattr(message, "video_note", None):
+            return "video_note"
         return None
 
     def _history_page(self, messages):
@@ -1014,6 +1051,9 @@ class CodexAsk(loader.Module):
                     if kind == "voice":
                         data = await self._client.download_file(message.voice, bytes)
                         return await self._transcribe_voice(data) if data else "[не удалось загрузить]"
+                    if kind == "video_note":
+                        data = await self._client.download_file(message.video_note, bytes)
+                        return await self._transcribe_video_note(data)
             except Exception:
                 return None
 
@@ -1142,7 +1182,8 @@ class CodexAsk(loader.Module):
                     transcript = media.get(m.id) or "[не удалось обработать]"
                     txt = pfx + f"🎤 Голосовое, расшифровка: {transcript}{caption}"
                 elif m.video_note:
-                    txt = pfx + f"🎥 Кружок{caption}"
+                    transcript = media.get(m.id) or "[не удалось обработать]"
+                    txt = pfx + f"🎥 Кружок, расшифровка: {transcript}{caption}"
                 elif m.poll:
                     txt = pfx + "📊 Опрос"
                 elif getattr(m, "action", None):
