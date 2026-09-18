@@ -448,14 +448,12 @@ class CodexAsk(loader.Module):
         return target == expected
 
     def _trigger_send_target_is_authorized(self, trig, target, chat_id, topic_id=None):
-        """Allow a trigger to send only to its source chat or to a fixed,
-        owner-authored list of numeric Telegram destinations."""
+        """Allow a trigger to send to the watched chat or back to the chat
+        where its owner registered it."""
         if self._trigger_target_is_current_chat(target, chat_id, topic_id):
             return True
-        allowed = trig.get("allowed_send_targets")
-        if not isinstance(allowed, (list, tuple, set, frozenset)):
-            return False
-        return str(target or "").strip() in {str(value).strip() for value in allowed}
+        origin_chat = str(trig.get("registration_chat_id") or "").strip()
+        return bool(origin_chat) and str(target or "").strip() == origin_chat
 
     @staticmethod
     def _trigger_allowed_tools(trig):
@@ -2332,7 +2330,7 @@ class CodexAsk(loader.Module):
             return None, "action=agent требует instruction"
         report_to = None
         if action == "agent":
-            report_to = str(spec.get("report_to") or "origin").strip().lower()
+            report_to = str(spec.get("report_to") or "notify").strip().lower()
             if report_to not in ("origin", "notify"):
                 return None, "report_to для action=agent должен быть origin или notify"
         elif "report_to" in spec:
@@ -2375,21 +2373,6 @@ class CodexAsk(loader.Module):
                 if any(not isinstance(tool, str) or not tool.strip() for tool in raw_allowed_tools):
                     return None, "allowed_tools должен содержать непустые строки"
                 allowed_tools = list(dict.fromkeys(tool.strip() for tool in raw_allowed_tools))
-        allowed_send_targets = None
-        if "allowed_send_targets" in spec:
-            raw_targets = spec.get("allowed_send_targets")
-            if raw_targets is not None:
-                if isinstance(raw_targets, (str, int)):
-                    raw_targets = [raw_targets]
-                if not isinstance(raw_targets, (list, tuple, set, frozenset)):
-                    return None, "allowed_send_targets должен быть списком chat_id"
-                allowed_send_targets = []
-                for target in raw_targets:
-                    value = str(target).strip()
-                    if not re.fullmatch(r"-?\d+(?:/\d+)?", value):
-                        return None, "allowed_send_targets принимает только numeric chat_id[/topic_id]"
-                    if value not in allowed_send_targets:
-                        allowed_send_targets.append(value)
         trig = {
             "id": uuid.uuid4().hex[:8],
             "kind": kind,
@@ -2448,8 +2431,6 @@ class CodexAsk(loader.Module):
             trig["report_to"] = report_to
         if "allowed_tools" in spec:
             trig["allowed_tools"] = allowed_tools
-        if "allowed_send_targets" in spec:
-            trig["allowed_send_targets"] = allowed_send_targets
         return trig, None
 
     async def _register_trigger_action(self, chat_arg, specs, chat_id, anchor_msg_id=None):
@@ -3118,11 +3099,11 @@ class CodexAsk(loader.Module):
             "Если инструкция сводится к 'просто сообщи об этом' -- вызови разрешённый "
             "send_message на этот адрес, а не просто отвечай текстом без реального вызова тула."
         )
-        extra_targets = trig.get("allowed_send_targets") or []
-        if extra_targets:
+        origin_chat = str(trig.get("registration_chat_id") or "").strip()
+        if origin_chat and origin_chat != str(message.chat_id):
             prompt += (
-                " Помимо текущего чата send_message разрешён только в эти явно "
-                "разрешённые адреса: " + ", ".join(map(str, extra_targets)) + "."
+                " Помимо текущего чата send_message разрешён в чат, из которого "
+                "владелец зарегистрировал этот триггер: " + origin_chat + "."
             )
         # Serializes against both repeat firings of THIS trigger and any
         # _fire_reply_via_agent firing on the same chat -- see that
@@ -3225,7 +3206,7 @@ class CodexAsk(loader.Module):
         # report_to=notify is for autonomous responders: their actual
         # send_message call reaches the counterparty, while the model-final
         # report is kept out of that chat in the default notifications topic.
-        if trig.get("report_to", "origin") == "notify":
+        if trig.get("report_to", "notify") == "notify":
             await self._notify_topic("notify", text)
             return
         registration_chat_id = trig.get("registration_chat_id")
