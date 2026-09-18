@@ -299,6 +299,45 @@ def test_default_trigger_allowlist_denies_privileged_and_public_tools():
         ), tool
 
 
+def test_trigger_can_send_only_to_explicit_owner_authorized_destination():
+    trig = trigger(allowed_send_targets=[OTHER_CHAT_ID])
+    bot = make_module({CURRENT_CHAT_ID: [trig]})
+    requester_id = "trigger:trigger-1"
+
+    assert run_async(
+        bot._tool_request_is_authorized(
+            requester_id, CURRENT_CHAT_ID, tool="send_message",
+            args={"target": OTHER_CHAT_ID},
+        )
+    )
+    assert not run_async(
+        bot._tool_request_is_authorized(
+            requester_id, CURRENT_CHAT_ID, tool="send_message",
+            args={"target": "999999"},
+        )
+    )
+
+
+def test_agent_trigger_does_not_report_internal_prompt_after_a_real_send():
+    bot = make_module()
+    trig = trigger(allowed_send_targets=[OTHER_CHAT_ID])
+    message = FakeMessage()
+
+    def enqueue_and_mark_sent(*args, **kwargs):
+        bot._mark_sent_message(CURRENT_CHAT_ID, "✅ Сообщение отправлено")
+        return True
+
+    bot._enqueue = Mock(side_effect=enqueue_and_mark_sent)
+    bot._backend_failed = Mock(return_value=False)
+    bot._poll_result_silent = AsyncMock(return_value=("done", []))
+    bot._dispatch_answer = AsyncMock()
+
+    run_async(bot._fire_agent_action(trig, message, "watched chat", "sender", allow_fallback=False))
+
+    bot._dispatch_answer.assert_not_awaited()
+    bot._notify_topic.assert_not_awaited()
+
+
 def test_explicit_trigger_allowlist_expands_tools_but_history_stays_local():
     trig = trigger(allowed_tools=["register_trigger", "read_history", "send_message"])
     bot = make_module({CURRENT_CHAT_ID: [trig]})
@@ -352,6 +391,15 @@ def test_invalid_allowed_tools_are_rejected():
         "instruction": "answer", "allowed_tools": {"register_trigger": True},
     })
     assert error == "allowed_tools должен быть списком имён tools"
+
+
+def test_invalid_allowed_send_target_is_rejected():
+    bot = make_module()
+    _, error = bot._build_trigger({
+        "kind": "keyword", "value": ["ping"], "action": "agent",
+        "instruction": "answer", "allowed_send_targets": ["@not_a_numeric_chat"],
+    })
+    assert error == "allowed_send_targets принимает только numeric chat_id[/topic_id]"
 
 
 def test_agent_trigger_report_destination_is_validated_and_persisted():
