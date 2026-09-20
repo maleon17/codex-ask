@@ -1,5 +1,6 @@
 """CodexAsk mirror regressions; all transport and Telegram objects are faked."""
 import asyncio
+import re
 from unittest.mock import AsyncMock
 
 from test_trigger_authorization import codex_ask, make_module
@@ -155,3 +156,69 @@ def test_format_messages_marks_which_message_a_reply_answers():
     assert "id=10" in lines[0] and "реплай" not in lines[0]
     assert "id=11" in lines[1] and "реплай" not in lines[1]
     assert "id=12" in lines[2] and "реплай на id=10" in lines[2]
+
+
+class PhotoHistoryMsg(HistoryMsg):
+    def __init__(self, msg_id, text):
+        super().__init__(msg_id, text)
+        self.photo = object()
+
+
+class PagedHistoryClient:
+    """Small Telegram-shaped history source with real cursor semantics."""
+    def __init__(self, messages):
+        self.messages = messages
+        self.calls = []
+
+    async def get_messages(self, chat_id, **kwargs):
+        self.calls.append((chat_id, kwargs))
+        limit = kwargs["limit"]
+        if "offset_id" in kwargs:
+            return list(reversed([m for m in self.messages if m.id < kwargs["offset_id"]]))[:limit]
+        assert kwargs["reverse"] is True
+        maximum = kwargs.get("max_id", float("inf"))
+        return [m for m in self.messages if kwargs["min_id"] < m.id < maximum][:limit]
+
+    async def get_entity(self, sender_id):
+        return type("Sender", (), {"first_name": str(sender_id)})()
+
+    async def download_file(self, photo, as_bytes):
+        return b"photo"
+
+
+def test_before_history_continuation_reads_every_truncated_media_page_once(monkeypatch):
+    """A before-range page must continue forward through its original snapshot."""
+    bot = make_module()
+    client = PagedHistoryClient([
+        PhotoHistoryMsg(7, "seven"),
+        PhotoHistoryMsg(8, "eight"),
+        PhotoHistoryMsg(9, "nine"),
+    ])
+    bot._client = client
+
+    async def upload_photo(self, data, filename):
+        return filename
+
+    monkeypatch.setattr(codex_ask.CodexAsk, "_upload_to_lightrag", upload_photo)
+
+    result = run(bot._read_history_action(1, cnt=3, direction="before", reply_id=10))
+    rendered_ids = []
+    while True:
+        rendered_ids.extend(map(int, re.findall(r"\[id=(\d+)", result)))
+        continuation = re.search(
+            r'read_history\(count=(\d+), direction="after", reply_id=(\d+), until_id=(\d+)\)',
+            result,
+        )
+        if not continuation:
+            break
+        count, reply_id, until_id = map(int, continuation.groups())
+        result = run(bot._read_history_action(
+            1, cnt=count, direction="after", reply_id=reply_id, until_id=until_id,
+        ))
+
+    assert rendered_ids == [7, 8, 9]
+    assert [call[1] for call in client.calls] == [
+        {"offset_id": 10, "limit": 3},
+        {"min_id": 7, "limit": 2, "reverse": True, "max_id": 10},
+        {"min_id": 8, "limit": 1, "reverse": True, "max_id": 10},
+    ]

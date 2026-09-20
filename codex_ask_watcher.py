@@ -787,7 +787,7 @@ class ChatSession:
                     "requester_id": request.get("requester_id"),
                     "topic_id": request.get("topic_id"),
                     "message_id": request.get("message_id"),
-                    "chat_id": self.chat_id,
+                    "chat_id": str(request.get("chat_id") or self.chat_id),
                 })
             except Exception as exc:
                 log(f"{self.instance_id}:{self.chat_id} tool context unavailable: {exc}")
@@ -797,11 +797,7 @@ class ChatSession:
                     pass
         client = self.client if mode != "classify" else self._new_client(restricted=True)
         try:
-            # Triggered turns explicitly opt into the same persistent session
-            # as the user's .xask conversation.  Keep the old mode behaviour
-            # for normal chat requests, while making the session contract
-            # explicit in the queue protocol.
-            persistent = mode == "chat" or bool(request.get("resume_session"))
+            persistent = mode == "chat"
             thread_id = self._ensure_thread(persistent, client, generation)
             state.thread_id = thread_id
             if mode == "classify":
@@ -809,7 +805,7 @@ class ChatSession:
                 model = CODEX_CLASSIFY_MODEL
             else:
                 persona = load_persona(self.instance_id)
-                if str(self.chat_id) in NOMATS_CHAT_IDS:
+                if str(request.get("chat_id") or self.chat_id) in NOMATS_CHAT_IDS:
                     persona += NO_MATS_RULE
                 chat_context = str(request.get("chat_context") or "").strip()
                 context_prefix = f"\n\nКонтекст текущего чата:\n{chat_context}" if chat_context else ""
@@ -1023,7 +1019,8 @@ class Worker:
             chat_id = str(request.get("chat_id") or "")
             if not chat_id:
                 raise ValueError("queue item has no chat_id")
-            self._session(instance_id, chat_id).handle(request)
+            session_chat_id = str(request.get("session_chat_id") or "")
+            self._session(instance_id, session_chat_id or chat_id).handle(request)
         except Exception as exc:
             req_id = processing.stem.split(".", 1)[0]
             _atomic_json(RESULT_DIR / f"{req_id}.json", {

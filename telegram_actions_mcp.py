@@ -92,6 +92,14 @@ def _current_request_id():
     return "" if value is None else str(value)
 
 
+def _current_chat_id():
+    context = _current_context()
+    if context is None:
+        return CHAT_ID
+    value = context.get("chat_id")
+    return CHAT_ID if value in (None, "") else str(value)
+
+
 def _current_int(name, fallback):
     context = _current_context()
     value = fallback if context is None else context.get(name)
@@ -121,7 +129,7 @@ def _call_tool(tool: str, args: dict) -> str:
     req_id = str(uuid.uuid4())
     deadline = time.time() + POLL_TIMEOUT_S
     body = json.dumps({
-        "request_id": req_id, "instance_id": INSTANCE_ID, "chat_id": CHAT_ID,
+        "request_id": req_id, "instance_id": INSTANCE_ID, "chat_id": _current_chat_id(),
         "requester_id": _current_requester_id(), "parent_request_id": _current_request_id(),
         "tool": tool, "args": args,
         "expires_at": deadline,
@@ -375,10 +383,11 @@ def register_trigger(specs: list[dict] | dict, chat: str = "") -> str:
     полноценным агентным вызовом с доступом ко ВСЕМ этим же tools, оставь
     для случаев, где реально нужно рассуждение/несколько шагов, а не просто
     форматирование и отправка. report_to относится только к action=agent:
-    origin (по умолчанию) кладёт финальный отчёт в тред, где триггер создали;
-    notify кладёт его в дефолтный топик уведомлений. Для автоответчика,
-    который уже вызывает send_message человеку, указывай report_to=notify,
-    иначе финальный текст агента будет вторым сообщением в исходном чате.
+    notify (по умолчанию) кладёт финальный отчёт в дефолтный топик
+    уведомлений; origin кладёт его в тред, где триггер создали, только по
+    явной просьбе. Для автоответчика, который уже вызывает send_message
+    человеку, оставляй report_to=notify, иначе финальный текст агента будет
+    вторым сообщением в исходном чате.
     verify (опционально, для keyword/link/button) -- текстовое условие,
     дополнительно проверяемое Haiku перед действием (например "это
     сообщение является рекламой") -- используй когда простое совпадение

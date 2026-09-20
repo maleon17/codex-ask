@@ -26,8 +26,8 @@ def test_codex_client_enqueues_with_bearer_token(monkeypatch):
     assert captured[0].get_header("Authorization") == "Bearer codex-secret"
 
 
-def test_trigger_enqueue_requests_the_current_chat_session(monkeypatch):
-    """Triggered turns must opt into the persistent chat session explicitly."""
+def test_trigger_enqueue_requests_the_owner_chat_session(monkeypatch):
+    """Triggered turns carry the owner's registration chat as session routing."""
     import json
 
     bot = make_module()
@@ -36,10 +36,11 @@ def test_trigger_enqueue_requests_the_current_chat_session(monkeypatch):
 
     assert bot._enqueue(
         "trigger question", "7", "request-7", requester_id="trigger:1",
-        resume_session=True, chat_context="recent messages",
+        session_chat_id="99", chat_context="recent messages",
     )[0]
     payload = json.loads(captured[0].data)
-    assert payload["resume_session"] is True
+    assert payload["session_chat_id"] == "99"
+    assert "resume_session" not in payload
     assert payload["chat_context"] == "recent messages"
 
 

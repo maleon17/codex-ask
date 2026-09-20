@@ -173,9 +173,15 @@ def trigger(trigger_id="trigger-1", **extra):
 
 
 @pytest.mark.parametrize("action", ["agent", "reply"])
-def test_trigger_agent_and_reply_enqueue_non_owner_context(monkeypatch, action):
+@pytest.mark.parametrize(
+    ("registration_chat_id", "expected_session_chat_id"),
+    [(OTHER_CHAT_ID, OTHER_CHAT_ID), (CURRENT_CHAT_ID, None), ("", None)],
+)
+def test_trigger_agent_and_reply_enqueue_non_owner_context(
+    monkeypatch, action, registration_chat_id, expected_session_chat_id,
+):
     """Regression: old code put OWNER_ID into both autonomous queue requests."""
-    trig = trigger()
+    trig = trigger(registration_chat_id=registration_chat_id)
     bot = make_module({CURRENT_CHAT_ID: [trig]})
     message = FakeMessage()
     bot._enqueue = Mock(return_value=True)
@@ -197,7 +203,8 @@ def test_trigger_agent_and_reply_enqueue_non_owner_context(monkeypatch, action):
     assert requester_id == "trigger:trigger-1"
     assert requester_id != OWNER_ID
     assert not requester_id.isdigit()
-    assert kwargs["resume_session"] is True
+    assert kwargs["session_chat_id"] == expected_session_chat_id
+    assert "resume_session" not in kwargs
     assert kwargs["chat_context"] == "fresh trigger history"
 
 

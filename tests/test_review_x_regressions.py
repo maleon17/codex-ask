@@ -169,20 +169,54 @@ def test_trigger_turn_resumes_the_interactive_chat_thread(monkeypatch, tmp_path)
             raise AssertionError(method)
 
     monkeypatch.setattr(w, "AppServerClient", ResumeClient)
-    index = w.SessionIndex(w.SESSIONS_FILE)
-    index.set("instance", "42", "interactive-thread")
-    session = w.ChatSession("instance", "42", index)
-    session.handle({
-        "request_id": "trigger", "mode": "chat", "resume_session": True,
+    worker = w.Worker()
+    worker.index.set("instance", "99", "interactive-thread")
+    (w.QUEUE_DIR / "trigger.json").write_text(json.dumps({
+        "request_id": "trigger", "mode": "chat", "chat_id": "42", "session_chat_id": "99",
+        "instance_id": "instance",
         "question": "automatic reply", "requester_id": "trigger:rule",
         "chat_context": "[id=1, Анна]: Джарвис, ты тут?",
-    })
+    }))
+    worker._process_request(w.QUEUE_DIR / "trigger.json")
 
+    session = worker._session("instance", "99")
     methods = [method for method, _, _ in session.client.calls]
     assert methods == ["thread/resume", "turn/start"]
     prompt = session.client.calls[1][1]["input"][0]["text"]
     assert "Контекст текущего чата" in prompt
     assert "Джарвис, ты тут?" in prompt
+    worker.close()
+
+
+def test_session_routing_keeps_observed_chat_for_tools_and_nomats(monkeypatch, tmp_path):
+    w = isolated_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(w, "AppServerClient", FakeClient)
+    monkeypatch.setattr(w, "NOMATS_CHAT_IDS", {"42"})
+    writes = []
+    original_atomic_json = w._atomic_json
+
+    def record(path, value):
+        if path == w._tool_context_path("instance", "99"):
+            writes.append(dict(value))
+        original_atomic_json(path, value)
+
+    monkeypatch.setattr(w, "_atomic_json", record)
+    worker = w.Worker()
+    request = {
+        "request_id": "trigger", "mode": "chat", "chat_id": "42", "session_chat_id": "99",
+        "instance_id": "instance", "question": "automatic reply", "requester_id": "trigger:rule",
+    }
+    (w.QUEUE_DIR / "trigger.json").write_text(json.dumps(request))
+    worker._process_request(w.QUEUE_DIR / "trigger.json")
+
+    session = worker._session("instance", "99")
+    prompt = next(params["input"][0]["text"] for method, params, _ in session.client.calls if method == "turn/start")
+    assert writes == [{
+        "request_id": "trigger", "requester_id": "trigger:rule", "topic_id": None,
+        "message_id": None, "chat_id": "42",
+    }]
+    assert "КАТЕГОРИЧЕСКИ запрещён мат" in prompt
+    worker.close()
 
 
 def load_mcp(monkeypatch, tmp_path):
@@ -227,6 +261,30 @@ def test_mcp_reads_topic_and_excluded_message_from_dynamic_turn_context(monkeypa
         ("read_history", {"count": 50, "direction": None, "reply_id": None, "until_id": None,
                           "topic_id": 22, "exclude_id": 202, "chat": ""}),
     ]
+
+
+def test_mcp_uses_observed_chat_from_turn_context_with_env_fallback(monkeypatch, tmp_path):
+    module = load_mcp(monkeypatch, tmp_path)
+    path = tmp_path / (module.hashlib.sha256(b"instance\0" + b"42").hexdigest() + ".json")
+    bodies = []
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return b"{}"
+
+    monkeypatch.setattr(module, "POLL_TIMEOUT_S", 0)
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, **_: bodies.append(request.data) or Response())
+
+    path.write_text(json.dumps({"chat_id": "99"}))
+    module._call_tool("send_message", {})
+    path.unlink()
+    module._call_tool("send_message", {})
+
+    assert [json.loads(body)["chat_id"] for body in bodies] == ["99", "42"]
 
 
 def test_classify_uses_a_fresh_restricted_client(monkeypatch, tmp_path):
