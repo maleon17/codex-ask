@@ -142,6 +142,77 @@ def make_module(triggers=None):
     return instance
 
 
+def test_confirmation_buttons_defer_security_to_live_authorizer():
+    card_chat_id = -1003399019582
+    bot = make_module()
+    bot._resolve_target_entity_topic = AsyncMock(return_value=(object(), None))
+    bot._bot_chat_id = Mock(return_value=card_chat_id)
+    bot._target_report_note = AsyncMock(return_value="")
+    bot._message_link = Mock(return_value="")
+    send_message = AsyncMock()
+    bot.inline = types.SimpleNamespace(
+        generate_markup=Mock(side_effect=lambda buttons: buttons),
+        bot=types.SimpleNamespace(send_message=send_message),
+    )
+
+    run_async(bot._send_confirm_request(
+        {"id": "confirm-1", "kind": "link", "target": "3399019582", "confirm_users": []},
+        FakeMessage(), "watched chat", "sender", "suspicious link",
+    ))
+
+    buttons = send_message.call_args.kwargs["reply_markup"][0]
+    assert len(buttons) == 2
+    assert all(button["disable_security"] is True for button in buttons)
+    assert all(button["args"] == ("confirm-1", CURRENT_CHAT_ID, 77, card_chat_id) for button in buttons)
+
+
+def test_confirmation_authorizer_accepts_current_admin_but_not_forwarded_chat_admin():
+    card_chat_id = -1003399019582
+    bot = make_module()
+    bot._owner_id_cache = int(OWNER_ID)
+    bot._client = types.SimpleNamespace(get_entity=AsyncMock(return_value=types.SimpleNamespace(username=None)))
+    bot._get_chat_admin_ids = AsyncMock(return_value={42})
+    trig = {"confirm_users": ["44"]}
+
+    def call(sender_id, chat_id=card_chat_id):
+        return types.SimpleNamespace(original_call=types.SimpleNamespace(sender_id=sender_id), chat_id=chat_id)
+
+    assert run_async(bot._confirm_authorized(call(42), trig, card_chat_id))
+    assert run_async(bot._confirm_authorized(call(44), trig, card_chat_id))
+    assert run_async(bot._confirm_authorized(call(int(OWNER_ID)), trig, card_chat_id))
+    assert not run_async(bot._confirm_authorized(call(43), trig, card_chat_id))
+    assert not run_async(bot._confirm_authorized(call(42, OTHER_CHAT_ID), trig, card_chat_id))
+    bot._get_chat_admin_ids.assert_any_await(card_chat_id, refresh=True)
+
+
+def test_confirmation_denial_is_private_and_cannot_change_card():
+    card_chat_id = -1003399019582
+    bot = make_module({CURRENT_CHAT_ID: [{"id": "confirm-1", "confirm_users": []}]})
+    bot._owner_id_cache = int(OWNER_ID)
+    bot._get_chat_admin_ids = AsyncMock(return_value={42})
+    raw_call = types.SimpleNamespace(sender_id=43, answer=AsyncMock())
+    call = types.SimpleNamespace(original_call=raw_call, chat_id=card_chat_id, edit=AsyncMock())
+
+    run_async(bot._trigger_confirm_dismiss(call, "confirm-1", CURRENT_CHAT_ID, 77, card_chat_id))
+
+    raw_call.answer.assert_awaited_once()
+    assert raw_call.answer.call_args.kwargs == {"alert": True}
+    call.edit.assert_not_awaited()
+
+
+def test_confirmation_admin_refresh_bypasses_stale_cache():
+    bot = make_module()
+    bot._admin_cache = {CURRENT_CHAT_ID: (float("inf"), {42})}
+
+    async def admins(chat_id, filter):
+        assert chat_id == CURRENT_CHAT_ID
+        yield types.SimpleNamespace(id=43)
+
+    bot._client = types.SimpleNamespace(iter_participants=admins)
+    assert run_async(bot._get_chat_admin_ids(CURRENT_CHAT_ID)) == {42}
+    assert run_async(bot._get_chat_admin_ids(CURRENT_CHAT_ID, refresh=True)) == {43}
+
+
 def test_legacy_external_loader_adapter_returns_codex_module():
     assert isinstance(codex_ask.register("external-test"), codex_ask.loader.Module)
 

@@ -2250,7 +2250,7 @@ class CodexAsk(loader.Module):
 
     _admin_cache = {}  # chat_id -> (fetched_at, {admin user ids}); 10min TTL
 
-    async def _get_chat_admin_ids(self, chat_id):
+    async def _get_chat_admin_ids(self, chat_id, refresh=False):
         """Live admin/owner list for skip_admins triggers, cached per chat --
         this is checked on every incoming message in a chat with a
         skip_admins trigger, so an uncached GetParticipants call every time
@@ -2258,9 +2258,10 @@ class CodexAsk(loader.Module):
         concept, no rights to list, etc.) caches an empty set rather than
         retrying every message -- skip_admins then just never exempts
         anyone there, which is the safe default (fail toward still firing
-        the trigger, not toward silently exempting an unverified sender)."""
+        the trigger, not toward silently exempting an unverified sender).
+        Confirmation clicks use refresh=True to check current admin rights."""
         cached = self._admin_cache.get(chat_id)
-        if cached and time.time() - cached[0] < 600:
+        if not refresh and cached and time.time() - cached[0] < 600:
             return cached[1]
         admin_ids = set()
         try:
@@ -3295,45 +3296,22 @@ class CodexAsk(loader.Module):
             f"Сообщение: <blockquote>{_h(text_preview_raw)}</blockquote>"
             f"{verify_note}{notify_note}{link_note}{target_note}\nУдалить?"
         )
-        # Heroku's OWN inline framework gates ANY button press to
-        # security._owner (real owner + .owneradd'd people) UNLESS the
-        # button dict itself carries "always_allow": [user_id, ...] --
-        # this check runs in heroku/inline/events.py BEFORE our own
-        # callback (_trigger_confirm_delete/_dismiss, hence _confirm_authorized)
-        # ever gets invoked, completely independent of it. Discovered live
-        # 2026-08-31: a non-owner confirm_users entry (real person, correct
-        # username) got Heroku's own native "Вы не можете нажать на эту
-        # кнопку" -- our confirm_users allowlist alone never had a chance
-        # to run. always_allow needs real numeric ids (Telegram's own
-        # security._owner list is ids, and the framework does a plain `in`
-        # membership check against it) -- resolve confirm_users' mix of
-        # ids/@usernames here, once per card, rather than storing ids only
-        # (usernames stay human-editable/readable in the trigger itself).
-        # This is the deliberately narrow alternative to .owneradd, which
-        # the owner does NOT want to hand out here (.owneradd is full
-        # co-owner control of the whole userbot, not just these buttons).
-        always_allow_ids = []
-        for u in (trig.get("confirm_users") or []):
-            raw = u.lstrip("@")
-            if raw.isdigit():
-                always_allow_ids.append(int(raw))
-                continue
-            try:
-                ent = await self._client.get_entity(raw)
-                if getattr(ent, "id", None):
-                    always_allow_ids.append(ent.id)
-            except Exception:
-                pass
+        # Heroku checks button permissions before calling us. Let this
+        # confirmation callback run for any click, then enforce the current
+        # owner/confirm_users/admin rules in _confirm_authorized. A static
+        # always_allow list cannot cover chat admins (or later promotions).
+        # Carry the original card destination too: an admin of a chat where
+        # the card was forwarded must not gain authority over the source.
         markup = self.inline.generate_markup([[
             {
                 "text": "🗑 Удалить", "callback": self._trigger_confirm_delete,
-                "args": (trig["id"], message.chat_id, message.id),
-                "always_allow": always_allow_ids,
+                "args": (trig["id"], message.chat_id, message.id, target_chat),
+                "disable_security": True,
             },
             {
                 "text": "✅ Оставить", "callback": self._trigger_confirm_dismiss,
-                "args": (trig["id"], message.chat_id, message.id),
-                "always_allow": always_allow_ids,
+                "args": (trig["id"], message.chat_id, message.id, target_chat),
+                "disable_security": True,
             },
         ]])
         thread_kwargs = {"message_thread_id": topic_id} if topic_id else {}
@@ -3365,23 +3343,23 @@ class CodexAsk(loader.Module):
 
     _owner_id_cache = None  # this account's own user id, resolved once
 
-    async def _confirm_authorized(self, call, trig):
+    async def _confirm_authorized(self, call, trig, card_chat_id):
         """Who's allowed to press a confirm card's Удалить/Оставить
         buttons: the owner (this account) always; anyone listed in the
         ORIGINAL trigger's confirm_users (id or @username, see
         _build_trigger) always, regardless of Telegram admin status; or --
         if the card was routed to an external chat via action=confirm's
         `target` (see _send_confirm_request) -- an admin of THAT chat too,
-        since it's their own community being moderated. call.chat_id is
-        wherever the card actually landed, so the admin branch generalizes
-        automatically: the default (unrouted) case posts into the owner's
+        since it's their own community being moderated. The admin branch
+        checks the original card destination, not a forwarded copy's chat:
+        the default (unrouted) case posts into the owner's
         own private forum, where only the owner is a member anyway, same
         restriction as before this existed. `trig` may be None if the
         trigger was removed/edited-and-replaced since the card was sent
         (see _find_trigger_by_id) -- confirm_users is then simply
         unavailable, owner/admin checks still apply. Reuses
-        _get_chat_admin_ids -- the same cached admin lookup skip_admins
-        already relies on -- rather than a fresh per-press API call. Fails
+        _get_chat_admin_ids but refreshes it on each confirmation click,
+        so a promoted or demoted admin gets their current rights. Fails
         CLOSED (denies) if the admin lookup itself fails, same fail-safe
         direction as everywhere else in this file that gates an action on
         trust -- confirm_users exists precisely because that admin lookup
@@ -3421,10 +3399,12 @@ class CodexAsk(loader.Module):
                 pass
             if uname and any(u.lstrip("@").lower() == uname.lower() for u in trig["confirm_users"]):
                 return True
-        admin_ids = await self._get_chat_admin_ids(call.chat_id)
+        if call.chat_id != card_chat_id:
+            return False
+        admin_ids = await self._get_chat_admin_ids(card_chat_id, refresh=True)
         return real_sender_id in admin_ids
 
-    async def _trigger_confirm_delete(self, call, trig_id, target_chat_id, target_message_id):
+    async def _trigger_confirm_delete(self, call, trig_id, target_chat_id, target_message_id, card_chat_id):
         # call.edit() -> InlineManager._edit_unit(), which has no `parse_mode`
         # param at all (no **kwargs sink either -- an unknown kwarg is a hard
         # TypeError, not silently ignored). Text is already treated as HTML
@@ -3432,10 +3412,10 @@ class CodexAsk(loader.Module):
         # toggle exists), so passing parse_mode was never doing anything
         # except crashing this callback on every press.
         trig = self._find_trigger_by_id(trig_id)
-        if not await self._confirm_authorized(call, trig):
-            await call.answer(
+        if not await self._confirm_authorized(call, trig, card_chat_id):
+            await call.original_call.answer(
                 "Только владелец, доверенные пользователи или админы этой группы могут это подтверждать.",
-                show_alert=True,
+                alert=True,
             )
             return
         try:
@@ -3448,12 +3428,12 @@ class CodexAsk(loader.Module):
         except Exception as e:
             await call.edit(f"⚠️ Не смог удалить: {_h(str(e))}")
 
-    async def _trigger_confirm_dismiss(self, call, trig_id, target_chat_id, target_message_id):
+    async def _trigger_confirm_dismiss(self, call, trig_id, target_chat_id, target_message_id, card_chat_id):
         trig = self._find_trigger_by_id(trig_id)
-        if not await self._confirm_authorized(call, trig):
-            await call.answer(
+        if not await self._confirm_authorized(call, trig, card_chat_id):
+            await call.original_call.answer(
                 "Только владелец, доверенные пользователи или админы этой группы могут это подтверждать.",
-                show_alert=True,
+                alert=True,
             )
             return
         actor = await self._sender_label(call.original_call)
