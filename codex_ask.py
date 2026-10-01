@@ -41,7 +41,7 @@
 #
 # GPL AGPLv3
 
-import asyncio, html, json, os, re, secrets, shutil, subprocess, tempfile, time, urllib.request, urllib.parse, uuid
+import asyncio, html, json, logging, os, re, secrets, shutil, subprocess, tempfile, time, urllib.request, urllib.parse, uuid
 from datetime import datetime, timezone
 
 from herokutl.tl.functions.channels import ToggleForumRequest, InviteToChannelRequest, GetParticipantRequest
@@ -1479,10 +1479,15 @@ class CodexAsk(loader.Module):
     async def _poll_progress_and_result(self, message, req_id, animate=False):
         """Live-edits `message` with claude_watcher's streamed progress
         (thought/tool-call blocks) until it signals done, then returns
-        (message, answer, thoughts) -- thoughts is the list of intermediate
-        reasoning steps banked by claude_watcher.py (each one that was
-        followed by a tool call), for the final recap. Returns
-        (message, None, []) on timeout. The message is returned alongside
+        (message, answer, thoughts, generated_image_paths) -- thoughts is
+        the list of intermediate reasoning steps banked by claude_watcher.py
+        (each one that was followed by a tool call), for the final recap;
+        generated_image_paths is any image_generation tool output the model
+        produced this turn (remote paths on the backend host, still need
+        fetching via /download -- see _send_generated_images), so an image
+        the model draws gets delivered without the owner having to ask for
+        it via send_file every time (2026-10-01). Returns
+        (message, None, [], []) on timeout. The message is returned alongside
         the result so every caller keeps one explicit work-message state;
         `_safe_edit` never replaces it with a reply.
 
@@ -1541,7 +1546,7 @@ class CodexAsk(loader.Module):
             if d.get("request_id") is not None and d.get("request_id") != req_id:
                 continue
             if d.get("done"):
-                return message, d.get("answer"), (d.get("thoughts") or [])
+                return message, d.get("answer"), (d.get("thoughts") or []), (d.get("generated_image_paths") or [])
             progress = d.get("progress")
             if progress and progress != last_progress:
                 message = await self._safe_edit(message, progress, parse_mode="html")
@@ -1550,7 +1555,7 @@ class CodexAsk(loader.Module):
                 frame = THINKING_SPINNER_FRAMES[frame_i % len(THINKING_SPINNER_FRAMES)]
                 frame_i += 1
                 message = await self._safe_edit(message, f"{_h(frame)} Thinking", parse_mode="html")
-        return message, None, []
+        return message, None, [], []
 
     # The last of the text markers (SEARCH_CHAT/READ_HISTORY/LIST_TRIGGERS)
     # moved to real MCP tools 2026-08-11 -- see search_chat/read_history/
@@ -1615,6 +1620,47 @@ class CodexAsk(loader.Module):
             return f"Не смог отправить файл «{fname}»: {e}"
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    async def _send_generated_images(self, chat_id, paths):
+        """Auto-deliver image_generation tool output (2026-10-01) -- before
+        this, a picture the model drew just sat on the backend host until
+        the owner explicitly asked it to send_file, every single time (the
+        same gap codex-telegram-bot closed for its own product on
+        2026-09-20, commit e4fd589). Same fetch-then-send as
+        _send_file_action, just auto-triggered off generated_image_paths
+        instead of a model-issued send_file tool call, and silent on
+        failure (logged, not reported to the chat) since this always runs
+        right after a real answer already went out -- a transport hiccup
+        here shouldn't look like the whole turn failed."""
+        if not paths:
+            return
+        try:
+            entity = await self._client.get_entity(int(chat_id))
+        except Exception as exc:
+            logging.warning("could not resolve chat %s for generated image delivery: %s", chat_id, exc)
+            return
+        loop = asyncio.get_running_loop()
+        for path in paths:
+            fname = os.path.basename(path) or "image.png"
+            tmp_dir = tempfile.mkdtemp(prefix="jarvis_img_")
+            tmp_path = os.path.join(tmp_dir, fname)
+            try:
+                def fetch():
+                    req = urllib.request.Request(
+                        f"{BACKEND_URL}/download?path={urllib.parse.quote(path)}",
+                        headers=_relay_headers(),
+                    )
+                    with RELAY_OPENER.open(req, timeout=60) as r:
+                        return r.read()
+
+                data = await loop.run_in_executor(None, fetch)
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                await self._client.send_file(entity, tmp_path)
+            except Exception as exc:
+                logging.warning("could not deliver generated image %s: %s", path, exc)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @staticmethod
     def _dialog_full_name(ent):
@@ -4083,7 +4129,7 @@ class CodexAsk(loader.Module):
         # (fails with "chat not found" everywhere else) -- no combination
         # of inline-message tricks gets around that, it's a hard Bot-API
         # chat-access requirement, not a formatting/schema issue.
-        answer, thoughts = [None, []]
+        answer, thoughts, generated_image_paths = [None, [], []]
         topic_id = self._topic_of(message)
         enqueued = False
         enqueue_error = ""
@@ -4097,7 +4143,7 @@ class CodexAsk(loader.Module):
                 if round_num == 0:
                     self._commit_history_anchor(pending_anchor)
                 enqueued = True
-                work_message, answer, thoughts = await self._poll_progress_and_result(
+                work_message, answer, thoughts, generated_image_paths = await self._poll_progress_and_result(
                     work_message, req_id, animate=animate,
                 )
 
@@ -4126,6 +4172,7 @@ class CodexAsk(loader.Module):
             return
 
         await self._dispatch_answer(message, chat_id, orig_question, mode, round_num, work_message, answer, thoughts)
+        await self._send_generated_images(chat_id, generated_image_paths)
 
     async def _dispatch_answer(self, message, chat_id, orig_question, mode, round_num, work_message, answer, thoughts):
         """Everything _do_ask does once it actually HAS an answer from

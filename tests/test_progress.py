@@ -44,6 +44,26 @@ class ProgressRenderingTests(unittest.TestCase):
             [],
         )
 
+    def test_completed_image_generation_collects_the_saved_image_path(self):
+        # Mirrors codex-telegram-bot's TurnView test (e4fd589) -- before
+        # this, an image the model drew just sat on the backend host until
+        # the owner explicitly asked for it via send_file every time
+        # (2026-10-01).
+        state = TurnState("request")
+        state.add_notification("item/completed", {"item": {
+            "type": "imageGeneration", "savedPath": "/tmp/generated.png",
+        }})
+        state.add_notification("item/completed", {"item": {
+            "type": "imageGeneration", "saved_path": "/tmp/second.png",
+        }})
+        state.add_notification("item/completed", {"item": {
+            "type": "imageGeneration", "savedPath": "/tmp/generated.png",
+        }})
+        self.assertEqual(
+            state.generated_image_paths,
+            ["/tmp/generated.png", "/tmp/second.png"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

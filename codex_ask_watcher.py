@@ -430,6 +430,7 @@ class TurnState:
         self.lock = threading.RLock()
         self.done = threading.Event()
         self.items: list[dict] = []
+        self.generated_image_paths: list[str] = []
         self.reasoning: list[str] = []
         self.final_text = ""
         self.stream_text = ""
@@ -542,6 +543,16 @@ class TurnState:
                         self.active_item_id = item_id or self.active_item_id
                 if method == "item/completed":
                     self.items.append(item)
+                    if item_type == "image_generation":
+                        # Mirrors codex-telegram-bot's TurnView (e4fd589):
+                        # the app-server calls this savedPath, accept
+                        # snake_case too for compatibility with older
+                        # servers. The owner had to explicitly ask the
+                        # model to send_file a generated image every time
+                        # before this -- deliver it unprompted instead.
+                        image_path = item.get("savedPath") or item.get("saved_path")
+                        if isinstance(image_path, str) and image_path not in self.generated_image_paths:
+                            self.generated_image_paths.append(image_path)
                     if item_type == "agent_message":
                         text = _item_text(item.get("text")) or self.stream_text
                         self.final_text = text or self.final_text
@@ -862,6 +873,7 @@ class ChatSession:
                 "request_id": req_id,
                 "answer": answer,
                 "thoughts": state.reasoning[-5:],
+                "generated_image_paths": state.generated_image_paths,
             })
         except Exception as exc:
             log(f"{self.instance_id}:{self.chat_id} request failed: {exc}")
