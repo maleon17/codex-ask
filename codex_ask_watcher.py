@@ -193,6 +193,29 @@ def log(message: str) -> None:
     print(f"[codex-jarvis] {message}", flush=True)
 
 
+# Same scheme as cmd_queue.py's _artifact_path/_register_artifact (not
+# imported -- the two live in separate processes/services, communicating
+# through this shared /tmp state the same way RESULT_DIR etc. already do).
+# A generated-image path is useless to the userbot's /download fetch
+# without this: cmd_queue.py's /download 404s on anything that isn't
+# registered first (the S02 TODO.md finding's fix -- /download used to
+# accept the whole filesystem, now it only serves artifacts an instance
+# explicitly vouched for). The existing explicit send_file tool call never
+# registered anything either; this closes that gap for both paths, not
+# just the new automatic one.
+RELAY_STATE_DIR = os.environ.get("JARVIS_RELAY_STATE_DIR", "/tmp/jarvisask_relay_state")
+
+
+def _register_artifact_for_download(instance_id: str, path: str) -> bool:
+    resolved = os.path.realpath(path)
+    if not os.path.isabs(resolved) or not os.path.isfile(resolved):
+        return False
+    key = hashlib.sha256(resolved.encode("utf-8", "surrogateescape")).hexdigest()
+    target = Path(RELAY_STATE_DIR) / "artifacts" / instance_id / f"{key}.json"
+    _atomic_json(target, {"path": resolved})
+    return True
+
+
 def ensure_dirs() -> None:
     for path in (QUEUE_DIR, RESULT_DIR, RESET_DIR, TOOL_CONTEXT_DIR, STATE_DIR, CODEX_HOME):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -868,6 +891,9 @@ class ChatSession:
                 self.new_context_notice = ""
             if not answer:
                 answer = "(Codex не вернул текста ответа)"
+            for image_path in state.generated_image_paths:
+                if not _register_artifact_for_download(self.instance_id, image_path):
+                    log(f"{self.instance_id}:{self.chat_id} could not register generated image {image_path} for download")
             _atomic_json(RESULT_DIR / f"{req_id}.json", {
                 "done": True,
                 "request_id": req_id,

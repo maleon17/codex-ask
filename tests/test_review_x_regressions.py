@@ -458,3 +458,30 @@ def test_old_app_server_reader_cannot_fail_a_new_generation_request():
 
     assert not request_thread.is_alive()
     assert outcome["value"] == {"fresh": True}
+
+
+def test_generated_image_gets_registered_for_download_the_same_way_cmd_queue_expects(tmp_path):
+    # cmd_queue.py's /download 404s on anything not registered via its own
+    # _register_artifact first (the S02 TODO.md fix). The watcher and
+    # cmd_queue.py are separate processes on the same host, communicating
+    # through this shared /tmp state the same way RESULT_DIR already does
+    # -- this locks in that the hashing scheme matches exactly, since a
+    # mismatch here is a silent 404 with no test ever catching it
+    # otherwise (2026-10-01, caught live: the first real end-to-end test
+    # of the auto-image-delivery feature 404'd for exactly this reason).
+    import hashlib
+    import json as json_module
+
+    worker = load_worker()
+    worker.RELAY_STATE_DIR = str(tmp_path)
+    real_file = tmp_path / "generated.png"
+    real_file.write_bytes(b"not a real png, just needs to exist")
+
+    assert worker._register_artifact_for_download("andrey_codex", str(real_file))
+
+    key = hashlib.sha256(str(real_file).encode("utf-8", "surrogateescape")).hexdigest()
+    record_path = tmp_path / "artifacts" / "andrey_codex" / f"{key}.json"
+    assert record_path.is_file()
+    assert json_module.loads(record_path.read_text()) == {"path": str(real_file)}
+
+    assert not worker._register_artifact_for_download("andrey_codex", str(tmp_path / "missing.png"))
