@@ -146,3 +146,5 @@ if [ -t 0 ]; then
         [Yy]*) setup_graphify "codex" ;;
     esac
 fi
+
+bash "$ROOT/scripts/setup_userbot_network.sh" codex_ask.py

@@ -1,0 +1,21 @@
+services:
+  userbot:
+    build:
+      context: .
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    stdin_open: true
+    tty: true
+    environment:
+      USERBOT_TG_ID: ${USERBOT_TG_ID:?set USERBOT_TG_ID in .env}
+      CLAUDE_JARVIS_BACKEND_URL: http://127.0.0.1:9092
+      CLAUDE_JARVIS_HTTP_PROXY: ""
+      CODEX_JARVIS_BACKEND_URL: http://127.0.0.1:9092
+      CODEX_JARVIS_HTTP_PROXY: ""
+    volumes:
+      - userbot_data:/data
+      - ./modules:/opt/ask-modules:ro
+
+volumes:
+  userbot_data:
