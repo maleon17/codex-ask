@@ -57,16 +57,12 @@ Fallback occurs only on explicit structured backend failures. Timeouts are repor
 Requirements:
 
 - Linux with Python 3.10+
-- `systemd`
+- `systemd` and `sudo`
 - Codex CLI installed and authenticated with `codex login`
-- shared queue relay exposing `/xask`, `/xreset` and Telegram tool endpoints
+- shared queue relay exposing `/xask`, `/xreset` and Telegram tool endpoints — normally the ClaudeAsk checkout's `cmd_queue.py`, see [Relay credentials](#relay-credentials)
 - supported Telethon/Hikka userbot; this project targets [Heroku](https://github.com/coddrago/Heroku)
 
 Heroku may run on the backend host or in Docker on a separate host.
-
-Install and start the userbot using Heroku's own instructions before loading `codex_ask.py`.
-
-Install:
 
 ```bash
 git clone https://github.com/maleon17/codex-ask.git
@@ -75,9 +71,16 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-The setup creates a dedicated `CODEX_HOME`, MCP virtual environment and local `config.toml`. Authentication is linked from `$HOME/.codex/auth.json`; it is not copied into Git.
+`setup.sh` does everything on the backend side in one pass:
 
-Runtime paths such as `codex_home/`, `state/` and `.venv/` are gitignored.
+- creates a dedicated `CODEX_HOME`, MCP virtual environment and local `config.toml`, and links authentication from `$HOME/.codex/auth.json` (never copied into Git)
+- writes the persona env (`jarvis.env`)
+- if it finds a ClaudeAsk checkout (prompts for the path, default `~/claude-jarvis`), registers an owner and generates a relay token for an `instance_id` you choose (1–64 letters/digits/`_`/`-`, starting with a letter or digit), restarting the shared relay so it takes effect — printing the exact `.xasknet` commands to paste into Telegram at the end; otherwise it tells you to do that step by hand on whichever host runs the relay
+- installs and starts the worker's systemd service (skipping it if a service by that name is already active, so re-running to add a second instance is safe)
+- optionally builds the graphify code map
+- optionally builds and starts a local Docker userbot container (Heroku image, first-run Telegram sign-in included), or configures Tailscale on this host for a remote userbot
+
+Runtime paths such as `codex_home/`, `state/` and `.venv/` are gitignored. The only things it cannot do for you: the Codex login itself, and anything that has to happen inside Telegram (loading the modules, running `.xasknet`, the userbot's own first-time Telegram sign-in if you're not using the Docker option).
 
 ## Load the userbot modules
 
@@ -87,16 +90,7 @@ Load `jarvis_ask.py` first, then `codex_ask.py`, as Telegram documents into the 
 .lm
 ```
 
-Configure the instance once:
-
-Choose `<instance_id>` yourself (for example, `mybot`). On the backend host, in the ClaudeAsk checkout that runs the shared relay, generate `<token>` with:
-
-```bash
-sudo env JARVIS_RELAY_TOKENS_FILE=/etc/jarvis-ask/relay-tokens.json \
-  python3 cmd_queue.py --add-token mybot
-```
-
-Set `/etc/jarvis-ask/relay-owners.json` to `{"mybot": 123456789}` (or add this entry to the existing JSON object). Replace the number with your numeric Telegram user ID and restart the relay. Use that same ID and the printed token below.
+Then run the `.xasknet` command `setup.sh` printed for you (or, if you skipped instance setup, generate it manually first — see [Relay credentials](#relay-credentials)):
 
 ```text
 .xasknet token <token>
@@ -108,6 +102,8 @@ or:
 ```text
 .xasknet tailnet <instance_id> <backend_url>
 ```
+
+Send the token command in a private chat, not a group. A single userbot can share the same `instance_id`/token between ClaudeAsk and CodexAsk; separate userbots each need their own.
 
 ### Remote userbot over Tailscale
 
@@ -134,23 +130,47 @@ These settings live in the userbot's persistent configuration rather than enviro
 
 Each instance uses a bearer token. `.xasknet token` stores it in the userbot configuration and never displays it afterward.
 
-The local MCP worker receives either `JARVIS_RELAY_TOKEN` or `JARVIS_RELAY_TOKENS_JSON` from a root-owned environment file. Do not put relay tokens into `codex-config.toml` or commit them to the repository.
+The local MCP worker receives either `JARVIS_RELAY_TOKEN` or `JARVIS_RELAY_TOKENS_JSON` from a root-owned environment file (`/etc/jarvis-ask/relay-token.env` by default) referenced by the worker's systemd unit. Do not put relay tokens into `codex-config.toml` or commit them to the repository.
 
-## Manual worker service
+`setup.sh` generates this token for you when it can reach the relay's `cmd_queue.py` (same host as this worker, in the ClaudeAsk checkout) — see the [Setup](#setup) walkthrough above. On a genuinely split deployment, generate it on the relay's own host instead, following ClaudeAsk's [Relay authentication](https://github.com/maleon17/claude-ask#relay-authentication-and-trust-boundary), then put the token in `/etc/jarvis-ask/relay-token.env` on this host yourself.
 
-Copy `codex-jarvis.service.example`, replace:
+## Manual setup (without setup.sh)
 
-- `__USER__`
-- `__INSTALL_DIR__`
-- `__CODEX_HOME__`
-- `__CODEX_CWD__`
+Everything `setup.sh` automates, as raw commands, for anyone who wants full control or is scripting a different deployment.
 
-Then:
+Workspace, `CODEX_HOME` and MCP dependencies:
 
 ```bash
+CODEX_CWD="$HOME"                      # or wherever Codex should treat as its working directory
+CODEX_HOME_DIR="$PWD/codex_home"
+mkdir -p "$CODEX_HOME_DIR" && chmod 700 "$CODEX_HOME_DIR"
+ln -s "$HOME/.codex/auth.json" "$CODEX_HOME_DIR/auth.json"
+
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements-mcp.txt
+sed -e "s|__MCP_PYTHON__|$PWD/.venv/bin/python|g" -e "s|__INSTALL_DIR__|$PWD|g" \
+    codex-config.toml.example > "$CODEX_HOME_DIR/config.toml"
+```
+
+Relay token, generated on whichever host runs `cmd_queue.py` (see ClaudeAsk's [manual setup](https://github.com/maleon17/claude-ask#manual-setup-without-setupsh) for the owner-registration half of this), then copied here:
+
+```bash
+echo "JARVIS_RELAY_TOKEN=<printed token>" | sudo tee /etc/jarvis-ask/relay-token.env
+sudo chmod 600 /etc/jarvis-ask/relay-token.env
+```
+
+systemd service, after replacing `__USER__`, `__INSTALL_DIR__`, `__CODEX_HOME__` and `__CODEX_CWD__` in `codex-jarvis.service.example`:
+
+```bash
+sudo install -m 0644 codex-jarvis.service.example /etc/systemd/system/codex-jarvis.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now codex-jarvis.service
 ```
+
+For the userbot side (local Docker or remote Tailscale), see ClaudeAsk's equivalent manual steps — the Dockerfile/compose files and Tailscale commands are shared between both products.
+
+Then continue from [Load the userbot modules](#load-the-userbot-modules).
 
 ## Updating
 
