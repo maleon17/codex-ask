@@ -89,6 +89,15 @@ Load `jarvis_ask.py` first, then `codex_ask.py`, as Telegram documents into the 
 
 Configure the instance once:
 
+Choose `<instance_id>` yourself (for example, `mybot`). On the backend host, in the ClaudeAsk checkout that runs the shared relay, generate `<token>` with:
+
+```bash
+sudo env JARVIS_RELAY_TOKENS_FILE=/etc/jarvis-ask/relay-tokens.json \
+  python3 cmd_queue.py --add-token mybot
+```
+
+Set `/etc/jarvis-ask/relay-owners.json` to `{"mybot": 123456789}` (or add this entry to the existing JSON object). Replace the number with your numeric Telegram user ID and restart the relay. Use that same ID and the printed token below.
+
 ```text
 .xasknet token <token>
 .xasknet local <instance_id>
