@@ -90,7 +90,7 @@ Load `jarvis_ask.py` first, then `codex_ask.py`, as Telegram documents into the 
 .lm
 ```
 
-Then run the `.xasknet` command `setup.sh` printed for you (or, if you skipped instance setup, generate it manually first — see [Relay credentials](#relay-credentials)):
+Then run `.xasknet` with the exact `<token>` and `<instance_id>` `setup.sh` printed to your terminal a moment ago (or that `cmd_queue.py --add-token <instance_id>` printed, if you generated them by hand on the relay's host — see [Relay credentials](#relay-credentials)). That token is shown once and stored nowhere else in plaintext; if you lost it, re-run `setup.sh` or `cmd_queue.py --add-token` again to mint a new one for the same instance:
 
 ```text
 .xasknet token <token>
