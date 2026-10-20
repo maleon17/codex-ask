@@ -357,7 +357,6 @@ class CodexAsk(loader.Module):
     # I/O (download + image upload or voice transcription). The next page
     # starts immediately after it, so no media is replaced with a stub.
     HISTORY_MEDIA_BATCH_SIZE = 1
-    READ_HISTORY_TEXT_PAGE_LIMIT = 24000
 
     # -- Forum topics (Phase 1 infra) -----------------------------------------
 
@@ -1012,17 +1011,12 @@ class CodexAsk(loader.Module):
             msgs = await self._client.get_messages(chat_id, search=keyword, limit=limit, **kwargs)
             if not msgs:
                 return "Ничего не найдено."
-            found = []
-            for m in msgs:
-                txt = m.raw_text or ""  # see _get_reply_text for why not .text
-                sid = getattr(m, "sender_id", "???")
-                try:
-                    ent = await self._client.get_entity(sid)
-                    name = getattr(ent, "first_name", str(sid))
-                except Exception:
-                    name = str(sid)
-                found.append(f"[{name}]: {txt[:4000]}")
-            return "\n\n".join(found)
+            # Same line format as a normal history read (id, date, reply
+            # link, media) -- a bare "[Имя]: текст" here used to leave the
+            # model without the id it needs for a follow-up like
+            # delete_messages, forcing it to go re-read raw history just to
+            # find the id of a message it had already found via search.
+            return await self._format_messages(list(reversed(msgs)), char_limit=4000)
         except Exception as e:
             return f"Ошибка поиска: {e}"
 
@@ -1043,22 +1037,22 @@ class CodexAsk(loader.Module):
         return None
 
     def _history_page(self, messages):
-        """Return a chronological prefix whose expensive work fits one MCP call."""
+        """Return a chronological prefix whose expensive work fits one MCP call.
+
+        Boundary is media alone, not text volume -- a page is "everything up
+        to a media item, that media item, everything after it up to the NEXT
+        media item". A char-size cap used to also force a break, which chopped
+        plain-text stretches into needless extra pages (and extra round trips)
+        even with no media anywhere near them.
+        """
         selected = []
         media_count = 0
-        text_size = 0
         for message in messages:
             media_cost = 1 if self._history_media_kind(message) else 0
-            raw_text = getattr(message, "raw_text", "") or ""
-            estimated_size = min(max(len(raw_text), 80), 4000)
-            if selected and (
-                media_count + media_cost > self.HISTORY_MEDIA_BATCH_SIZE
-                or text_size + estimated_size > self.READ_HISTORY_TEXT_PAGE_LIMIT
-            ):
+            if selected and media_count + media_cost > self.HISTORY_MEDIA_BATCH_SIZE:
                 break
             selected.append(message)
             media_count += media_cost
-            text_size += estimated_size
         return selected
 
     async def _prefetch_history_media(self, messages):
