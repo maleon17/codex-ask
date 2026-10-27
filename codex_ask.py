@@ -215,6 +215,24 @@ def _h(text):
     return html.escape(text or "", quote=False)
 
 
+# Defensive fallback for a prompt-compliance gap (same bug confirmed live in
+# the ClaudeAsk persona 2026-10-27, patched here too): the persona is told
+# to answer in HTML, but nothing told it HOW to write a link in HTML, so it
+# occasionally falls back to Markdown's [text](url) instead -- parse_mode=
+# "html" doesn't interpret that syntax, so it shows up as literal brackets
+# instead of a clickable link. The persona now spells out <a href="URL">
+# text</a> explicitly, which should make this rare; this regex only exists
+# to catch whatever still slips through without touching any already-
+# correct HTML elsewhere in the answer.
+_MD_LINK_RE = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
+
+
+def _md_links_to_html(text):
+    return _MD_LINK_RE.sub(
+        lambda m: f'<a href="{m.group(2).replace(chr(34), "%22")}">{m.group(1)}</a>', text,
+    )
+
+
 _INLINE_CITATION_PUA_SPAN_RE = re.compile("\ue200.*?\ue201", re.DOTALL)
 _INLINE_CITATION_PUA_CHAR_RE = re.compile("[\ue200-\ue20b]")
 _INLINE_CITATION_TOKEN = r"turn\d+(?:search|news|view|forecast|finance|image|video|product)\d+"
@@ -4262,6 +4280,7 @@ class CodexAsk(loader.Module):
         # conflict entirely; the recap lines above it still use blockquote
         # normally since they never contain model-authored HTML.
         answer = _strip_inline_citations(answer)
+        answer = _md_links_to_html(answer)
         recap = "".join(f"\n<blockquote>🤔 {_h(t)}</blockquote>" for t in thoughts)
         final_text = f"<blockquote>💬 {_h(orig_question)}</blockquote>{recap}\n🤖 {answer}"
         if len(final_text) <= self.TELEGRAM_TEXT_LIMIT:
