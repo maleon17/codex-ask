@@ -30,12 +30,29 @@ from app_server import AppServerClient, AppServerError
 
 
 ROOT = Path(__file__).resolve().parent
-QUEUE_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_QUEUE", "/tmp/jarvisask_xask_queue"))
-RESULT_DIR = Path(os.environ.get("CODEX_JARVIS_XASK_RESULT", "/tmp/jarvisask_xask_result"))
-RESET_DIR = Path(os.environ.get("CODEX_JARVIS_XRESET_QUEUE", "/tmp/jarvisask_xask_reset"))
-TOOL_CONTEXT_DIR = Path(
-    os.environ.get("CODEX_JARVIS_TOOL_CONTEXT_DIR", "/tmp/jarvisask_tool_context")
-)
+
+
+def _shared_state_dir(env_name, leaf):
+    """Mirrors the relay's cmd_queue.py: private runtime state shared with it
+    (never /tmp -- queue items carry chat text and uploaded media). The base
+    is 0700; ensure_dirs() creates the leaves. An explicit override still wins."""
+    override = os.environ.get(env_name)
+    if override:
+        return Path(override)
+    base = os.environ.get("JARVIS_STATE_DIR") or os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "telegram-ai",
+    )
+    base_path = Path(os.path.abspath(os.path.expanduser(base)))
+    base_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    base_path.chmod(0o700)
+    return base_path / leaf
+
+
+QUEUE_DIR = _shared_state_dir("CODEX_JARVIS_XASK_QUEUE", "xask_queue")
+RESULT_DIR = _shared_state_dir("CODEX_JARVIS_XASK_RESULT", "xask_result")
+RESET_DIR = _shared_state_dir("CODEX_JARVIS_XRESET_QUEUE", "xask_reset")
+TOOL_CONTEXT_DIR = _shared_state_dir("CODEX_JARVIS_TOOL_CONTEXT_DIR", "tool_context")
 STATE_DIR = Path(os.environ.get("CODEX_JARVIS_STATE_DIR", str(ROOT / "state")))
 SESSIONS_FILE = STATE_DIR / "sessions.json"
 CODEX_HOME = Path(os.environ.get("CODEX_JARVIS_CODEX_HOME", str(ROOT / "codex_home")))
@@ -203,7 +220,7 @@ def log(message: str) -> None:
 # explicitly vouched for). The existing explicit send_file tool call never
 # registered anything either; this closes that gap for both paths, not
 # just the new automatic one.
-RELAY_STATE_DIR = os.environ.get("JARVIS_RELAY_STATE_DIR", "/tmp/jarvisask_relay_state")
+RELAY_STATE_DIR = str(_shared_state_dir("JARVIS_RELAY_STATE_DIR", "relay_state"))
 
 
 def _register_artifact_for_download(instance_id: str, path: str) -> bool:

@@ -6,20 +6,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+UMask=0077
 User=__USER__
 WorkingDirectory=__INSTALL_DIR__
-Environment=PATH=/home/__USER__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Optional: owner name/id for the persona template, and chats where the
 # persona's profanity is suppressed. Written by setup.sh; '-' = ok if absent.
 EnvironmentFile=-__INSTALL_DIR__/jarvis.env
-# JARVIS_RELAY_TOKEN (one instance) or JARVIS_RELAY_TOKENS_JSON (many
-# instances) in this root-owned EnvironmentFile authenticates the local
-# telegram_actions_mcp.py client to the shared relay. Written by setup.sh;
-# '-' = ok if absent.
-EnvironmentFile=-/etc/jarvis-ask/relay-token.env
+# JARVIS_RELAY_TOKENS_JSON (instance_id -> token) authenticates this worker's
+# telegram_actions_mcp.py client to the shared relay. Written by setup.sh,
+# mode 0600; this worker has its own file so another product's setup never
+# overwrites it.
+EnvironmentFile=-__RELAY_CONFIG_DIR__/relay-token-codex.env
 Environment=CODEX_HOME=__CODEX_HOME__
 Environment=CODEX_JARVIS_CODEX_HOME=__CODEX_HOME__
 Environment=CODEX_JARVIS_CWD=__CODEX_CWD__
+# Must match the relay's JARVIS_STATE_DIR: the queues are shared files.
+Environment=JARVIS_STATE_DIR=__STATE_DIR__
 ExecStart=/usr/bin/python3 -u __INSTALL_DIR__/codex_ask_watcher.py
 Restart=always
 RestartSec=3
