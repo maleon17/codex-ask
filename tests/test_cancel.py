@@ -81,3 +81,26 @@ def test_abandoned_marker_is_eventually_dropped(monkeypatch, tmp_path):
         assert not marker.exists()
     finally:
         worker.close()
+
+
+def test_stop_during_turn_setup_is_reported_as_cancelled_not_as_an_error(monkeypatch, tmp_path):
+    w = isolated_worker(monkeypatch, tmp_path)
+
+    class FailingClient(FakeClient):
+        def request(self, method, params=None, timeout=None):
+            if method == "turn/start":
+                # The stop arrives while the app-server is still being asked
+                # to start the turn, and that call then fails.
+                self.owner.cancel("setup")
+                raise w.AppServerError("app-server request timed out: turn/start")
+            return super().request(method, params, timeout)
+
+    monkeypatch.setattr(w, "AppServerClient", FailingClient)
+    session = w.ChatSession("instance", "42", w.SessionIndex(w.SESSIONS_FILE))
+    session.client.owner = session
+
+    session.handle({"request_id": "setup", "question": "hello"})
+
+    assert _result(w, "setup") == {
+        "done": True, "request_id": "setup", "cancelled": True, "answer": "", "thoughts": [],
+    }

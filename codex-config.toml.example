@@ -1,9 +1,10 @@
 # Generated into CODEX_HOME/config.toml by setup.sh.
-# Paths are substituted for the local checkout and MCP virtualenv.
+# The Telegram-action MCP server lives in telegram-ai-core and runs in that
+# repository's virtualenv; both paths are substituted at install time.
 
 [mcp_servers.telegram_actions]
 command = "__MCP_PYTHON__"
-args = ["__INSTALL_DIR__/telegram_actions_mcp.py"]
+args = ["__CORE_DIR__/telegram_actions_mcp.py"]
 startup_timeout_sec = 20.0
 tool_timeout_sec = 200.0
 default_tools_approval_mode = "auto"

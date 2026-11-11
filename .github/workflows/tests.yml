@@ -6,5 +6,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: python -m py_compile codex_ask.py codex_ask_watcher.py jarvis_ask.py app_server.py telegram_actions_mcp.py
+      - run: python -m py_compile codex_ask.py codex_ask_watcher.py jarvis_ask.py app_server.py
+      - run: bash -n setup.sh
       - run: ./scripts/run_tests.sh

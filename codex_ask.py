@@ -1,47 +1,31 @@
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl (sha256 b05a959f9f78);
+# change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
-# Separate userbot product. It deliberately does not import or depend on the
-# standalone Bot API application in codex-telegram-bot/.
-# This is the Codex-side sibling of ClaudeAsk: same Telegram-side action
-# implementation, with a separate xask queue/backend.
 #
-# The trigger store remains under the ClaudeAsk DB namespace. ClaudeAsk is
-# still the single incoming-message trigger watcher, so loading this sibling
-# never fires every shared trigger twice; both assistants can read/edit/
-# register the same rules through the common Telegram action relay.
+# One of two modules built from a single source (telegram-ai-core,
+# module/ask_module.py.tmpl): ClaudeAsk (.ask, Claude Code backend) and
+# CodexAsk (.xask, Codex backend). They can be loaded side by side.
 #
-# Rewrite of JarvisAsk (jarvis_ask.py): same UX (.xask/.xsearch/.xtranslate/.xnew,
-# in-place message editing so it looks like the user typed it themselves),
-# same "hosting connection" (backend HTTP endpoints -> cmd_queue.py -> queue
-# files), backend swapped to the separate codex_ask_watcher.py. See that
-# file's docstring for
-# why most of the old 8-tool client marker surface is gone.
+# The trigger store lives under the ClaudeAsk DB namespace in both modules, so
+# both assistants read/edit/register the same rules; with the JarvisAsk
+# coordinator loaded, one incoming message fires one coordinated action.
 #
-# Live progress: this polls codex_ask_watcher's streamed progress (a neutral
-# "✍️" writing/thought line with a concrete "🔧" tool call and result blocks,
-# same scheme as the Claude-Telegram-bridge project) and live-edits the same
-# message with whatever it published. The backend does not invent a generic
-# progress line while it is waiting, so the initial spinner remains visible
-# until a real event arrives. Once the
-# watcher signals done, all of that is wiped and replaced with a plain:
+# UX: in-place message editing, so it looks like the user typed the answer
+# themselves. Requests go to the queue relay (cmd_queue.py) over HTTP; the
+# backend worker (codex_ask_watcher.py) streams progress, which is live-edited into
+# the same message and finally replaced with a plain:
 #   👤 <what was asked>
 #   🤖 <answer>
 #
-# Bug fixes vs the old module:
-# - Hard round cap on the tool-marker recursion (old code had none -- if the
-#   backend kept returning markers, _do_ask would recurse forever, and the
-#   "thinking" spinner animation with it, indefinitely tying up the account).
-# - Reply attachments (photo/document) are uploaded to the lightrag host
-#   *before* asking, and their local path is handed to Claude directly, which
-#   reads/OCRs them itself via its own Read tool -- no separate ANALYZE_IMAGE/
-#   DOWNLOAD_REPLY round trip, and no dependency on the old dedicated OCR
-#   endpoint. (Still unverified live -- see note in analyze/reply handling.)
-# - No rich-message formatting anywhere: this module edits the *user's own*
-#   message, and Telegram's rich-message style needs Premium on that account.
-#   Plain HTML (<b>/<i>/<code>/<pre>) only, exactly like before.
+# Reply attachments (photo/document) are uploaded to the backend host before
+# asking and their path is handed to the agent, which reads them itself.
+#
+# Plain HTML (<b>/<i>/<code>/<pre>) only: this module edits the *user's own*
+# message, and Telegram's rich-message style needs Premium on that account.
 #
 # GPL AGPLv3
 
-import asyncio, html, json, logging, os, re, secrets, shutil, subprocess, tempfile, time, urllib.request, urllib.parse, uuid
+import asyncio, html, json, logging, os, re, secrets, shutil, subprocess, tempfile, time, urllib.error, urllib.request, urllib.parse, uuid
 from datetime import datetime, timezone
 
 from herokutl.tl.functions.channels import ToggleForumRequest, InviteToChannelRequest, GetParticipantRequest
@@ -59,34 +43,62 @@ from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotP
 from .. import loader, utils
 from .._internal import fw_protect
 
-# Direct tailnet address (this host's stable Tailscale IP), reached through
-# the local tailscaled userspace-networking proxy below -- NOT the public
-# Tailscale Funnel URL, which this userbot host's outbound path to the
-# funnel's edge IP range stopped completing TLS handshakes on (verified:
-# general internet fine, only that specific edge range affected).
-BACKEND_URL = os.environ.get(
-    "CODEX_JARVIS_BACKEND_URL", "http://100.98.146.81:9092"
-)
-HTTP_PROXY = os.environ.get("CODEX_JARVIS_HTTP_PROXY", "http://localhost:1056")
+__version__ = (2, 0, 0)
+
+# Where the queue relay is and how to reach it. Nothing is assumed: a freshly
+# loaded module is unconfigured until .xasknet (or the .cfg editor) stores
+# these in the module config, and _apply_config() copies them here. The
+# environment variables only seed the initial values, for container images
+# that prefer them.
+_ENV_BACKEND_URL = os.environ.get("CODEX_JARVIS_BACKEND_URL", "")
+_ENV_HTTP_PROXY = os.environ.get("CODEX_JARVIS_HTTP_PROXY", "")
+_ENV_INSTANCE_ID = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "")
+_ENV_RELAY_TOKEN = os.environ.get("CODEX_JARVIS_RELAY_TOKEN", "")
+BACKEND_URL = _ENV_BACKEND_URL
+# tailscaled on a userbot host without /dev/net/tun runs with
+# --tun=userspace-networking, so plain sockets never reach the tailnet: every
+# relay request then has to go through its local HTTP CONNECT proxy
+# (--outbound-http-proxy-listen=localhost:1056). Empty = connect directly.
+HTTP_PROXY = _ENV_HTTP_PROXY
+TAILNET_PROXY = "http://localhost:1056"
+
 
 def _make_relay_opener(proxy):
-    """Keep this module's proxy configuration private to this module."""
+    """Keep this module's proxy configuration private to this module: an Ask
+    instance must never replace urllib's process-global opener."""
     handlers = [urllib.request.ProxyHandler({"http": proxy})] if proxy else []
     return urllib.request.build_opener(*handlers)
 
-# tailscaled here runs with --tun=userspace-networking (no /dev/net/tun in
-# this container), so normal socket connections don't reach the tailnet by
-# themselves -- route every urllib request through its local HTTP CONNECT
-# proxy (--outbound-http-proxy-listen=localhost:1056) instead.
+
 RELAY_OPENER = _make_relay_opener(HTTP_PROXY)
-# Explicit now (was implicit -- claude_watcher.py defaulted a missing
-# instance_id to "andrey"), matching claude_ask_anatoly.py's structure
-# exactly. No functional change, just removes the one remaining asymmetry
-# between the two clients now that the backend's session-file naming no
-# longer special-cases this instance either (2026-08-04 symmetry pass).
-INSTANCE_ID = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
-RELAY_TOKEN = os.environ.get("CODEX_JARVIS_RELAY_TOKEN", "")
+INSTANCE_ID = _ENV_INSTANCE_ID
+RELAY_TOKEN = _ENV_RELAY_TOKEN
 ENGINE = "codex"
+
+
+# What a wait loop returns in place of an answer when the request was stopped
+# with .xstop: never a backend failure, so it must not trigger the
+# sibling-engine fallback or a "no answer" report.
+CANCELLED = object()
+STOPPED_TEXT = "⏹ Остановлено."
+STOPPED_UNCONFIRMED_TEXT = (
+    "⏹ Остановлено здесь, но бэкенд не подтвердил отмену — запрос мог доработать до конца."
+)
+
+
+def _configured():
+    """True once the module knows where the relay is and who it is."""
+    return bool(BACKEND_URL and INSTANCE_ID and RELAY_TOKEN)
+
+
+NOT_CONFIGURED_TEXT = (
+    "⚙️ <b>CodexAsk</b> ещё не настроен. В личном чате выполни:\n"
+    "<code>.xasknet token &lt;token&gt;</code>\n"
+    "<code>.xasknet local &lt;instance_id&gt;</code> — бэкенд на этом же хосте, или\n"
+    "<code>.xasknet tailnet &lt;instance_id&gt; &lt;backend_url&gt;</code> — бэкенд в tailnet.\n"
+    "Токен и instance_id печатает setup.sh бэкенда. Проверка связи: "
+    "<code>.xasknet check</code>"
+)
 MAX_ROUNDS = 5  # mirrors claude_watcher.py's own round discipline
 POLL_TIMEOUT_S = 600  # agentic file-editing tasks can genuinely take a while
 TELEGRAM_TEXT_LIMIT = 3500
@@ -140,10 +152,11 @@ TRIGGER_REQUESTER_PREFIX = "trigger:"
 TRIGGER_DEFAULT_ALLOWED_TOOLS = frozenset({"send_message"})
 HISTORY_TOOLS = frozenset({"search_chat", "read_history"})
 TRIGGER_LOCAL_SEND_TOOLS = frozenset({"send_message", "send_message_as_bot"})
-# The dedicated deployment/smoke channel is a trusted automation actor, not
-# a general user. It may exercise actions only in the owner's private chat;
-# a test-bot message in any other chat remains denied.
-TEST_CHANNEL_BOT_ID = 8747608932
+# Optional deployment/smoke channel (config test_bot_id, 0 = none): a bot the
+# owner drives for automated checks. A request it sends in its own private
+# chat with the owner's account is attributed to the owner; in any other chat
+# it is an ordinary sender. See _requester_for().
+TEST_CHANNEL_BOT_ID = 0
 INTERNAL_TOOL_RESULT_PREFIX = "[INTERNAL_TOOL_RESULT]"
 TOOL_PERMISSION_DENIAL = (
     f"{INTERNAL_TOOL_RESULT_PREFIX} Действие заблокировано: Telegram-действия "
@@ -157,15 +170,9 @@ TOOL_PERMISSION_DENIAL = (
 # generous free tier per the owner directly). Confirmed against Mistral's own
 # docs 2026-08-05, not guessed: POST multipart/form-data, model
 # voxtral-mini-latest, response JSON's "text" field holds the transcript.
-# No hardcoded default on purpose (this repo is a public git remote). A plain
-# env var does not survive a cold container restart on the Heroku-userbot
-# host -- the loader re-fetches this module fresh from its GitHub source on
-# every cold boot, and the env var itself is only ever set once at container
-# creation by the hosting panel, so any manual re-export is gone by the next
-# one. /data/ on that host is the one bind-mounted, persistent volume
-# (confirmed in BRIDGE_PROJECT_HANDOFF.md's Tailscale section) -- read the
-# real key from a file there first, so it survives both a module re-fetch
-# AND a full container reinstall.
+# The key comes from the module config (mistral_api_key). Two older sources
+# still work as fallbacks: /data/mistral_api_key.txt (a persistent volume on
+# container hosts) and the MISTRAL_API_KEY environment variable.
 def _load_mistral_api_key():
     try:
         with open("/data/mistral_api_key.txt", encoding="utf-8") as handle:
@@ -363,10 +370,115 @@ class _HeadlessReporter:
 
 @loader.tds
 class CodexAsk(loader.Module):
+    """Jarvis в твоих чатах на бэкенде Codex: .xask, .xsearch, .xtranslate, .xnew. Настройка сети: .xasknet"""
+
     strings = {"name": "CodexAsk"}
+
+    def __init__(self):
+        # request_id -> {"chat_id", "work_message_id", "cancel_error"} for every
+        # request this module is currently waiting on, and the ids that
+        # .xstop has asked to abandon.
+        self._active_requests = {}
+        self._cancelled_requests = set()
+        self.config = loader.ModuleConfig(
+            loader.ConfigValue(
+                "backend_url", "",
+                "Адрес очереди (relay) бэкенда, например http://127.0.0.1:9092. "
+                "Проще задать через .xasknet",
+                validator=loader.validators.String(),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "instance_id", "",
+                "Идентификатор этого юзербота на бэкенде (его печатает setup.sh)",
+                validator=loader.validators.String(),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "relay_token", "",
+                "Токен доступа к relay (его печатает setup.sh бэкенда)",
+                validator=loader.validators.Hidden(),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "http_proxy", "",
+                "HTTP-прокси до relay. Пусто — прямое соединение; для tailnet "
+                "без /dev/net/tun — http://localhost:1056",
+                validator=loader.validators.String(),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "mistral_api_key", "",
+                "Ключ Mistral для расшифровки голосовых (Voxtral). Пусто — "
+                "голосовые не расшифровываются",
+                validator=loader.validators.Hidden(),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "test_bot_id", 0,
+                "ID бота-тестового канала: его запросы в личном чате с тобой "
+                "выполняются с твоими правами. 0 — выключено",
+                validator=loader.validators.Integer(minimum=0),
+                on_change=self._apply_config,
+            ),
+            loader.ConfigValue(
+                "tailscale_hostname", "",
+                "Имя этого узла в tailnet. Пусто — userbot-<твой Telegram ID>",
+                validator=loader.validators.String(),
+            ),
+        )
+
+    def _apply_config(self):
+        """Copy the stored settings into the module-level values the request
+        code reads. Runs once the framework has loaded the config and again
+        whenever a value changes (.xasknet or the .cfg editor)."""
+        global BACKEND_URL, HTTP_PROXY, INSTANCE_ID, RELAY_TOKEN, RELAY_OPENER
+        global TEST_CHANNEL_BOT_ID, MISTRAL_API_KEY
+        config = self.config
+        BACKEND_URL = str(config["backend_url"] or _ENV_BACKEND_URL).strip().rstrip("/")
+        HTTP_PROXY = str(config["http_proxy"] or _ENV_HTTP_PROXY).strip()
+        INSTANCE_ID = str(config["instance_id"] or _ENV_INSTANCE_ID).strip()
+        RELAY_TOKEN = str(config["relay_token"] or _ENV_RELAY_TOKEN).strip()
+        RELAY_OPENER = _make_relay_opener(HTTP_PROXY)
+        try:
+            TEST_CHANNEL_BOT_ID = int(config["test_bot_id"] or 0)
+        except (TypeError, ValueError):
+            TEST_CHANNEL_BOT_ID = 0
+        MISTRAL_API_KEY = str(config["mistral_api_key"] or "").strip() or _load_mistral_api_key()
+
+    def _config_set(self, key, value):
+        """Store one setting now. The framework's own autosaver persists
+        config edits a little later; a restart in between must not lose a
+        freshly entered token."""
+        self.config[key] = value
+        try:
+            self.pointer("__config__", {})[key] = self.config[key]
+        except Exception:
+            pass
+
+    async def _requester_for(self, message):
+        """Who the relay should attribute an interactive request to: the
+        sender -- except the optional test channel, whose requests in its own
+        private chat with this account count as the owner's (owner-driven
+        automation). Everywhere else that bot is an ordinary sender."""
+        sender = getattr(message, "sender_id", None)
+        if (
+            TEST_CHANNEL_BOT_ID
+            and sender == TEST_CHANNEL_BOT_ID
+            and getattr(message, "chat_id", None) == TEST_CHANNEL_BOT_ID
+        ):
+            return await self._get_owner_id()
+        return sender
+
+    async def _require_config(self, work_message):
+        """False (after telling the user how to set up) while unconfigured."""
+        if _configured():
+            return True
+        await self._safe_edit(work_message, NOT_CONFIGURED_TEXT, parse_mode="html")
+        return False
     # A class attribute so self.TELEGRAM_TEXT_LIMIT resolves (it did not as
-    # a bare module-level name -- confirmed live in the ClaudeAsk twin of
-    # this file: every _dispatch_answer call raised AttributeError before
+    # a bare module-level name -- confirmed live: every _dispatch_answer
+    # call raised AttributeError before
     # delivering a final answer, no matter how short, since nothing ever
     # set this on an instance outside tests that shadow it directly on
     # their own bot object).
@@ -379,8 +491,6 @@ class CodexAsk(loader.Module):
     # -- Forum topics (Phase 1 infra) -----------------------------------------
 
     async def client_ready(self):
-        global BACKEND_URL, HTTP_PROXY, INSTANCE_ID, RELAY_TOKEN, RELAY_OPENER
-
         self._topics = {}
         self._owner_id_cache = None
         # chat_id -> asyncio.Lock, serializes action=agent/reply trigger
@@ -404,13 +514,18 @@ class CodexAsk(loader.Module):
         self._edited_trigger_tasks = {}
         # sid -> {pages, index, chat_id, code_msg_id, form} for the .xpersona pager
         self._persona_sessions = {}
-        network = self.db.get("CodexAsk", "network", None)
-        if isinstance(network, dict):
-            BACKEND_URL = network.get("backend_url", BACKEND_URL)
-            HTTP_PROXY = network.get("http_proxy", HTTP_PROXY)
-            INSTANCE_ID = network.get("instance_id", INSTANCE_ID)
-            RELAY_TOKEN = network.get("relay_token", RELAY_TOKEN)
-            RELAY_OPENER = _make_relay_opener(HTTP_PROXY)
+        # Versions before the module config kept these four values in one
+        # "network" dict; carry them over once so an update does not unset a
+        # working installation.
+        legacy = self.db.get("CodexAsk", "network", None)
+        if (
+            isinstance(legacy, dict)
+            and not self.config["backend_url"] and not self.config["relay_token"]
+        ):
+            for key in ("backend_url", "http_proxy", "instance_id", "relay_token"):
+                if legacy.get(key):
+                    self._config_set(key, legacy[key])
+        self._apply_config()
         await self._ensure_topics()
         # Same-host deployments do not need tailscaled and may not have its
         # binary installed. A live sibling deployment hit FileNotFoundError
@@ -549,10 +664,7 @@ class CodexAsk(loader.Module):
                 if tool in HISTORY_TOOLS:
                     return self._chat_arg_is_current(args.get("chat"), chat_id)
                 return True
-            return (
-                owner_authorized is None and owner_id is not None
-                and requester == str(TEST_CHANNEL_BOT_ID) and chat == str(owner_id)
-            )
+            return False
         except Exception:
             return False
 
@@ -1447,7 +1559,7 @@ class CodexAsk(loader.Module):
             if chat_context:
                 # Telegram can only be read by this userbot process. Pass a
                 # fresh, already-formatted snapshot to the watcher, which
-                # otherwise has only the Codex thread and queue item.
+                # otherwise has only its own session and the queue item.
                 payload["chat_context"] = chat_context
             data = json.dumps(payload).encode()
             with self._relay_open(urllib.request.Request(
@@ -1546,6 +1658,8 @@ class CodexAsk(loader.Module):
         deadline = time.monotonic() + POLL_TIMEOUT_S
         while time.monotonic() < deadline:
             await asyncio.sleep(min(sleep_s, max(0, deadline - time.monotonic())))
+            if req_id in self._cancelled_requests:
+                return message, CANCELLED, [], []
             if time.monotonic() >= deadline:
                 break
             try:
@@ -1572,6 +1686,8 @@ class CodexAsk(loader.Module):
             if d.get("request_id") is not None and d.get("request_id") != req_id:
                 continue
             if d.get("done"):
+                if d.get("cancelled"):
+                    return message, CANCELLED, [], []
                 return message, d.get("answer"), (d.get("thoughts") or []), (d.get("generated_image_paths") or [])
             progress = d.get("progress")
             if progress and progress != last_progress:
@@ -2703,8 +2819,7 @@ class CodexAsk(loader.Module):
         # chat" every item shares the same cid, so 45 triggers meant 45
         # sequential round-trips and blew straight through the MCP
         # relay's 30s timeout (caught live 2026-09-16, Паша: list_triggers
-        # never returned even scoped to one chat; same bug fixed in the
-        # ClaudeAsk twin of this file). Same cid within one call now
+        # never returned even scoped to one chat). Same cid within one call now
         # resolves once.
         label_cache = {}
         for cid, t in items:
@@ -2798,8 +2913,9 @@ class CodexAsk(loader.Module):
         and a plain `int(i)` on every entry with no guard used to raise an
         uncaught ValueError straight out of this function on a single bad
         entry, surfacing to the user as a raw Python exception string
-        instead of an actionable message (same bug fixed 2026-08-30 on
-        claude_ask.py's twin of this method -- ported here for parity).
+        instead of an actionable message (caught live 2026-08-30: "снеси всю
+        рекламу" -> "invalid literal for int() with base 10: ''", the whole
+        batch silently dropped with zero deleted).
         Now skips unparseable entries and still deletes everything valid,
         reporting what got skipped instead of failing the entire batch."""
         clean_ids = []
@@ -2827,30 +2943,22 @@ class CodexAsk(loader.Module):
         return f"✅ Удалено сообщений: {len(ids)}.{note}"
 
     async def _classify_condition(self, condition, text, allow_fallback=True):
-        """Tier 1: 3-way ("yes"/"no"/"unsure") classification via
-        cmd_queue.py's /xclassify, which routes to codex_ask_watcher.py's
-        mode='classify' (CODEX_CLASSIFY_MODEL, gpt-5.6-luna as of 2026-09-13 --
-        no Haiku equivalent on this side, but same flat ChatGPT-subscription
-        auth, not a metered external API -- see cmd_queue.py's
-        classify_semantic_codex for the full story). Lighter than the heavy
-        agentic `.xask` path, but not free like keyword/link/button -- used
-        for kind='semantic' triggers (rare, per the persona) AND as the
-        verify-gate for keyword-prefiltered triggers (see
-        _resolve_verified_action). "unsure" is a real third outcome, not an
-        error state.
+        """Tier 1: 3-way ("yes"/"no"/"unsure") classification via the relay's
+        /xclassify, which routes to this backend's own lightweight classify
+        mode (a small model on the same flat subscription, not a metered
+        external API). Lighter than the agentic `.xask` path, but not free
+        like keyword/link/button -- used for kind='semantic' triggers (rare,
+        per the persona) AND as the verify-gate for keyword-prefiltered
+        triggers (see _resolve_verified_action). "unsure" is a real third
+        outcome, not an error state.
 
-        cmd_queue.py's classify_semantic_codex can also return a distinct
-        "__unavailable__" sentinel (CLASSIFY_UNAVAILABLE there) instead of a
-        real verdict -- that means the call itself never got an answer
-        (queue write failed, or the timeout hit with no result, often the
-        account's flat-subscription limit), NOT that the model looked and
-        was genuinely unsure. A local network failure to /xclassify itself
-        is treated the same way. Unified 2026-08-30 with claude_ask.py's
-        identical method and the rest of the _fallback_backend/ENGINE
-        machinery -- this used to hand-roll its own retry straight against
-        BACKEND_URL/classify, bypassing the JarvisAsk coordinator entirely;
-        replaced with the same fallback() call every other cross-engine
-        retry in this file already goes through."""
+        The relay can also return a distinct "__unavailable__" sentinel
+        instead of a verdict -- the call itself never got an answer (queue
+        write failed, or the timeout hit with no result, often the account's
+        subscription limit), NOT that the model looked and was genuinely
+        unsure. A local network failure to /xclassify is treated the same way.
+        Either case retries once through the sibling engine via the JarvisAsk
+        coordinator's fallback() before reporting "unsure" to a caller."""
         if not condition or not text:
             return "unsure"
         loop = asyncio.get_running_loop()
@@ -3045,16 +3153,16 @@ class CodexAsk(loader.Module):
                 # handing an autonomous trigger to an unsafe implementation.
                 return
             self._commit_trigger_context_anchor(context_anchor)
-            answer = None
-            for _ in range(60):
-                await asyncio.sleep(1)
-                try:
-                    d = await asyncio.get_event_loop().run_in_executor(None, self._fetch_ask_status, req_id)
-                except Exception:
-                    continue
-                if isinstance(d, dict) and d.get("request_id") == req_id and d.get("done"):
-                    answer = d.get("answer")
-                    break
+            self._active_requests[req_id] = {"chat_id": str(message.chat_id), "work_message_id": None}
+            try:
+                answer, _thoughts = await self._poll_result_silent(req_id, timeout_s=60)
+            finally:
+                self._finish_request(req_id)
+        if answer is CANCELLED:
+            await self._notify_topic(
+                "moderation", f"⏹ Автоответ по триггеру [{_h(trig.get('id', '?'))}] остановлен командой .xstop.",
+            )
+            return True
         if not answer or self._backend_failed(answer):
             await self._notify_topic("moderation", "⚠️ Автоответ по триггеру не дождался ответа агента.")
             return False
@@ -3087,11 +3195,15 @@ class CodexAsk(loader.Module):
         loop = asyncio.get_running_loop()
         for _ in range(timeout_s):
             await asyncio.sleep(1)
+            if req_id in self._cancelled_requests:
+                return CANCELLED, []
             try:
                 d = await loop.run_in_executor(None, self._fetch_ask_status, req_id)
             except Exception:
                 continue
             if isinstance(d, dict) and d.get("request_id") == req_id and d.get("done"):
+                if d.get("cancelled"):
+                    return CANCELLED, []
                 return d.get("answer"), (d.get("thoughts") or [])
         return None, []
 
@@ -3286,7 +3398,16 @@ class CodexAsk(loader.Module):
                 # handing an autonomous trigger to an unsafe implementation.
                 return
             self._commit_trigger_context_anchor(context_anchor)
-            answer, thoughts = await self._poll_result_silent(req_id)
+            self._active_requests[req_id] = {"chat_id": str(message.chat_id), "work_message_id": None}
+            try:
+                answer, thoughts = await self._poll_result_silent(req_id)
+            finally:
+                self._finish_request(req_id)
+            if answer is CANCELLED:
+                await self._notify_topic(
+                    "moderation", f"⏹ Триггер [{_h(trig.get('id', '?'))}] (agent) остановлен командой .xstop.",
+                )
+                return True
             if answer is None or self._backend_failed(answer):
                 await self._notify_topic(
                     "moderation", f"⚠️ Триггер [{_h(trig.get('id', '?'))}] (agent) не дождался ответа.",
@@ -3827,6 +3948,8 @@ class CodexAsk(loader.Module):
         context). Ticks every 2s regardless of message traffic, same
         pattern as bridge.py's own watcher threads (_restart_watcher_loop
         etc) -- @loader.loop is the Heroku-framework equivalent of that."""
+        if not _configured():
+            return
         loop = asyncio.get_running_loop()
         try:
             data = await loop.run_in_executor(None, self._fetch_pending_tool_call)
@@ -4125,6 +4248,8 @@ class CodexAsk(loader.Module):
             orig_question = question
         if work_message is None:
             work_message = await self._work_message(message)
+        if not await self._require_config(work_message):
+            return
 
         if round_num == 0:
             reply_id = getattr(message, "reply_to_msg_id", None)
@@ -4216,6 +4341,7 @@ class CodexAsk(loader.Module):
         # of inline-message tricks gets around that, it's a hard Bot-API
         # chat-access requirement, not a formatting/schema issue.
         answer, thoughts, generated_image_paths = [None, [], []]
+        stopped = {}
         topic_id = self._topic_of(message)
         enqueued = False
         enqueue_error = ""
@@ -4223,15 +4349,30 @@ class CodexAsk(loader.Module):
             enqueued, enqueue_error = await self._enqueue_async(
                 question, chat_id, req_id, mode, topic_id=topic_id,
                 exclude_id=work_message.id,
-                requester_id=getattr(message, "sender_id", None),
+                requester_id=await self._requester_for(message),
             )
             if enqueued:
                 if round_num == 0:
                     self._commit_history_anchor(pending_anchor)
                 enqueued = True
-                work_message, answer, thoughts, generated_image_paths = await self._poll_progress_and_result(
-                    work_message, req_id, animate=animate,
-                )
+                self._active_requests[req_id] = {
+                    "chat_id": str(chat_id), "work_message_id": getattr(work_message, "id", None),
+                }
+                try:
+                    work_message, answer, thoughts, generated_image_paths = await self._poll_progress_and_result(
+                        work_message, req_id, animate=animate,
+                    )
+                finally:
+                    stopped = self._finish_request(req_id)
+
+        if answer is CANCELLED:
+            note = STOPPED_UNCONFIRMED_TEXT if stopped.get("cancel_error") else STOPPED_TEXT
+            await self._safe_edit(
+                work_message,
+                f"<blockquote>💬 {_h(orig_question)}</blockquote>\n<blockquote>{note}</blockquote>",
+                parse_mode="html",
+            )
+            return
 
         if allow_fallback and self._backend_failed(answer):
             fallback = self._fallback_backend()
@@ -4301,7 +4442,8 @@ class CodexAsk(loader.Module):
         # outside any quote at all. Not wrapping the answer avoids the
         # conflict entirely; the recap lines above it still use blockquote
         # normally since they never contain model-authored HTML.
-        answer = _strip_inline_citations(answer)
+        if ENGINE == "codex":
+            answer = _strip_inline_citations(answer)
         answer = _md_links_to_html(answer)
         recap = "".join(f"\n<blockquote>🤔 {_h(t)}</blockquote>" for t in thoughts)
         final_text = f"<blockquote>💬 {_h(orig_question)}</blockquote>{recap}\n🤖 {answer}"
@@ -4316,81 +4458,154 @@ class CodexAsk(loader.Module):
 
     # -- Commands -------------------------------------------------------------
 
+    def _finish_request(self, req_id):
+        """Forget a request this module was waiting on; returns its record."""
+        self._cancelled_requests.discard(req_id)
+        return self._active_requests.pop(req_id, None) or {}
+
+    def _cancel_on_relay(self, req_id):
+        """Blocking: ask the backend to stop working on one request."""
+        data = json.dumps({"request_id": req_id, "instance_id": INSTANCE_ID}).encode()
+        request = urllib.request.Request(
+            f"{BACKEND_URL}/xcancel", data=data,
+            headers=_relay_headers("application/json"), method="POST",
+        )
+        with self._relay_open(request, 5) as response:
+            return json.loads(response.read())
+
+    @loader.command()
+    async def xstop(self, message):
+        """Остановить запрос Jarvis (Codex) в этом чате (ответом на его сообщение — только этот запрос)"""
+        chat = str(message.chat_id)
+        in_chat = [req for req, info in self._active_requests.items() if info["chat_id"] == chat]
+        reply_id = getattr(message, "reply_to_msg_id", None)
+        replied = [req for req in in_chat if reply_id and self._active_requests[req]["work_message_id"] == reply_id]
+        targets = replied or in_chat
+        if not targets:
+            work_message = await self._work_message(message)
+            await self._safe_edit(work_message, "⏹ В этом чате сейчас нечего останавливать.")
+            return
+        loop = asyncio.get_running_loop()
+        for req_id in targets:
+            # Stop the backend first, so the message can say truthfully
+            # whether the work really ended or only stopped being shown.
+            try:
+                await loop.run_in_executor(None, self._cancel_on_relay, req_id)
+            except Exception:
+                if req_id in self._active_requests:
+                    self._active_requests[req_id]["cancel_error"] = True
+            self._cancelled_requests.add(req_id)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    def _relay_whoami(self):
+        """Blocking connectivity probe: (ok, human-readable verdict)."""
+        request = urllib.request.Request(f"{BACKEND_URL}/whoami", headers=_relay_headers())
+        try:
+            with self._relay_open(request, 8) as response:
+                data = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            if error.code == 401:
+                return False, "relay отвечает, но токен не подходит (401). Проверь <code>.xasknet token</code>."
+            if error.code == 404:
+                return False, "по этому адресу отвечает не relay или его старая версия (404 на /whoami)."
+            return False, f"relay ответил ошибкой HTTP {error.code}."
+        except Exception as error:
+            hint = " Прокси tailnet не отвечает — см. <code>.xasknet tailnet</code>." if HTTP_PROXY else ""
+            return False, f"нет связи с relay: {_h(str(error))}.{hint}"
+        relay_instance = str(data.get("instance_id") or "")
+        if relay_instance != INSTANCE_ID:
+            return False, (
+                f"токен принадлежит instance <code>{_h(relay_instance)}</code>, а здесь задан "
+                f"<code>{_h(INSTANCE_ID)}</code>. Исправь instance_id или токен."
+            )
+        return True, f"связь есть, relay узнал instance <code>{_h(relay_instance)}</code>."
+
     @loader.command()
     async def xasknet(self, message):
-        """Настроить сеть CodexAsk для этого экземпляра"""
-        global BACKEND_URL, HTTP_PROXY, INSTANCE_ID, RELAY_TOKEN, RELAY_OPENER
-
+        """[local|tailnet|custom|token|check|testbot] — настройка сети CodexAsk (без аргументов — справка и текущие значения)"""
         usage = (
-            "<b>.xasknet</b> — текущая конфигурация и справка\n"
-            "<code>.xasknet local &lt;instance_id&gt;</code>\n"
-            "<code>.xasknet tailnet &lt;instance_id&gt; &lt;backend_url&gt;</code>\n"
+            "<b>.xasknet</b> — настройка связи с бэкендом\n"
+            "<code>.xasknet token &lt;token&gt;</code> — токен relay (в личном чате!)\n"
+            "<code>.xasknet local &lt;instance_id&gt;</code> — бэкенд на этом же хосте\n"
+            "<code>.xasknet tailnet &lt;instance_id&gt; &lt;backend_url&gt;</code> — бэкенд в tailnet\n"
             "<code>.xasknet custom &lt;instance_id&gt; &lt;backend_url&gt; &lt;proxy_url|none&gt;</code>\n"
-            "<code>.xasknet token &lt;token&gt;</code>"
+            "<code>.xasknet check</code> — проверить связь\n"
+            "<code>.xasknet testbot &lt;id|off&gt;</code> — тестовый канал\n"
+            "Те же значения можно править в <code>.cfg CodexAsk</code>."
         )
 
         def config_text(prefix):
-            proxy = HTTP_PROXY or "disabled"
             return (
                 f"{prefix}\n"
-                f"instance_id: <code>{_h(INSTANCE_ID)}</code>\n"
-                f"backend_url: <code>{_h(BACKEND_URL)}</code>\n"
-                f"http_proxy: <code>{_h(proxy)}</code>\n"
-                f"relay_token: <code>{'configured' if RELAY_TOKEN else 'not configured'}</code>"
+                f"instance_id: <code>{_h(INSTANCE_ID or 'не задан')}</code>\n"
+                f"backend_url: <code>{_h(BACKEND_URL or 'не задан')}</code>\n"
+                f"http_proxy: <code>{_h(HTTP_PROXY or 'нет (прямое соединение)')}</code>\n"
+                f"relay_token: <code>{'задан' if RELAY_TOKEN else 'не задан'}</code>\n"
+                f"test_bot_id: <code>{TEST_CHANNEL_BOT_ID or 'выключен'}</code>"
             )
 
         args = utils.get_args_raw(message).split()
         work_message = await self._work_message(message)
         if not args:
-            await self._safe_edit(
-                work_message, config_text(usage), parse_mode="html"
-            )
+            await self._safe_edit(work_message, config_text(usage), parse_mode="html")
             return
+        mode = args[0].lower()
 
-        if args[0].lower() == "token" and len(args) == 2:
-            RELAY_TOKEN = args[1]
-            self.db.set("CodexAsk", "network", {
-                "instance_id": INSTANCE_ID,
-                "backend_url": BACKEND_URL,
-                "http_proxy": HTTP_PROXY,
-                "relay_token": RELAY_TOKEN,
-            })
+        if mode == "token" and len(args) == 2:
+            self._config_set("relay_token", args[1])
+            self._apply_config()
             await self._safe_edit(work_message, "✅ Relay token сохранён (значение скрыто).", parse_mode="html")
             return
 
-        mode = args[0].lower()
+        if mode == "check" and len(args) == 1:
+            if not await self._require_config(work_message):
+                return
+            ok, verdict = await asyncio.get_running_loop().run_in_executor(None, self._relay_whoami)
+            await self._safe_edit(work_message, f"{'✅' if ok else '❌'} {verdict}", parse_mode="html")
+            return
+
+        if mode == "testbot" and len(args) == 2:
+            value = args[1].lower()
+            if value in ("off", "none", "0"):
+                bot_id = 0
+            elif value.isdigit():
+                bot_id = int(value)
+            else:
+                await self._safe_edit(work_message, usage, parse_mode="html")
+                return
+            self._config_set("test_bot_id", bot_id)
+            self._apply_config()
+            await self._safe_edit(
+                work_message,
+                f"✅ Тестовый канал: <code>{bot_id or 'выключен'}</code>", parse_mode="html",
+            )
+            return
+
         if mode == "local" and len(args) == 2:
-            instance_id, backend_url, http_proxy = (
-                args[1], "http://127.0.0.1:9092", None
-            )
+            instance_id, backend_url, http_proxy = args[1], "http://127.0.0.1:9092", ""
         elif mode == "tailnet" and len(args) == 3:
-            instance_id, backend_url, http_proxy = (
-                args[1], args[2], "http://localhost:1056"
-            )
+            instance_id, backend_url, http_proxy = args[1], args[2], TAILNET_PROXY
         elif mode == "custom" and len(args) == 4:
             instance_id, backend_url = args[1], args[2]
-            http_proxy = None if args[3].lower() == "none" else args[3]
+            http_proxy = "" if args[3].lower() == "none" else args[3]
         else:
             await self._safe_edit(work_message, usage, parse_mode="html")
             return
 
-        if not instance_id or not backend_url.startswith(("http://", "https://")):
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", instance_id)
+            or not backend_url.startswith(("http://", "https://"))
+        ):
             await self._safe_edit(work_message, usage, parse_mode="html")
             return
 
-        BACKEND_URL = backend_url
-        HTTP_PROXY = http_proxy
-        INSTANCE_ID = instance_id
-        self.db.set(
-            "CodexAsk", "network",
-            {
-                "instance_id": INSTANCE_ID,
-                "backend_url": BACKEND_URL,
-                "http_proxy": HTTP_PROXY,
-                "relay_token": RELAY_TOKEN,
-            },
-        )
-        RELAY_OPENER = _make_relay_opener(HTTP_PROXY)
+        self._config_set("instance_id", instance_id)
+        self._config_set("backend_url", backend_url)
+        self._config_set("http_proxy", http_proxy)
+        self._apply_config()
         await self._safe_edit(
             work_message, config_text("✅ Сетевая конфигурация применена:"),
             parse_mode="html",
@@ -4398,7 +4613,7 @@ class CodexAsk(loader.Module):
 
     @loader.command()
     async def xask(self, message):
-        """<вопрос> — спросить Jarvis через Codex"""
+        """<вопрос> — спросить Jarvis (Codex)"""
         # get_args_raw, NOT get_args: get_args runs the text through
         # shlex.split (shell-style quoting) and, on a lone/unmatched
         # apostrophe -- common in normal Ukrainian/Russian text, e.g.
@@ -4417,7 +4632,7 @@ class CodexAsk(loader.Module):
 
     @loader.command()
     async def xsearch(self, message):
-        """<ключевое слово> — поиск по истории и ответ через Codex Jarvis"""
+        """<ключевое слово> — поиск по истории чата и ответ через Jarvis (Codex)"""
         kw = utils.get_args_raw(message).strip()  # see .ask above for why get_args_raw, not get_args
         work_message = await self._work_message(message)
         if not kw:
@@ -4439,7 +4654,7 @@ class CodexAsk(loader.Module):
 
     @loader.command()
     async def xtranslate(self, message):
-        """<текст> — перевод на русский через Codex"""
+        """<текст> — перевод на русский (Codex)"""
         text = utils.get_args_raw(message).strip()  # see .ask above for why get_args_raw, not get_args
         work_message = await self._work_message(message)
         if not text:
@@ -4452,9 +4667,11 @@ class CodexAsk(loader.Module):
 
     @loader.command()
     async def xnew(self, message):
-        """Очистить историю Codex-диалога и начать новую сессию"""
+        """Очистить историю диалога и начать новую сессию (Codex)"""
         chat_id = message.chat_id
         work_message = await self._work_message(message)
+        if not await self._require_config(work_message):
+            return
         # Clear the rolling-history anchor along with the session -- Claude's
         # own memory of the chat is gone too now, so the next .ask should
         # fall back to a full fixed-window fetch, not "just what's new since

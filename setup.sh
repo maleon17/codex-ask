@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Installer for the CodexAsk backend worker (codex_ask_watcher.py).
-#
-# The worker shares queue files with the relay (cmd_queue.py from the ClaudeAsk
-# checkout), so the relay must live on this same host.
+# Installer for the CodexAsk backend: the Codex worker (codex_ask_watcher.py),
+# plus the shared pieces it needs from telegram-ai-core (queue relay,
+# Telegram-action MCP server, userbot module) -- that repository is found next
+# to this one or cloned automatically.
 #
 # Safe to re-run: existing jarvis.env keys and an existing CODEX_HOME config
 # are kept, and a running worker is left running.
 #
 # Every question can be answered through the environment instead, which makes
 # an unattended install possible:
+#   TELEGRAM_AI_CORE_DIR      an existing telegram-ai-core checkout
 #   CODEX_JARVIS_CWD, CODEX_JARVIS_HOME_DIR, CODEX_JARVIS_SERVICE
-#   CLAUDE_JARVIS_CHECKOUT    ClaudeAsk checkout that provides the relay
 #   JARVIS_OWNER_NAME, JARVIS_OWNER_TG_ID, JARVIS_NOMATS_CHAT_IDS, JARVIS_PERSONA_DIR
 #   JARVIS_INSTANCE_ID        instance to register with the relay
+#   TELEGRAM_AI_CONFIG_DIR    credentials and registry (default ~/.config/telegram-ai)
+#   JARVIS_STATE_DIR          queues and uploads       (default ~/.local/state/telegram-ai)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,12 +49,15 @@ os.replace(tmp, path)
 PY
 }
 env_file_get() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n 1 || true; }
-# The value of one variable in a running service's environment, if readable.
-running_env() {
-    local pid
-    pid="$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)"
-    [[ -n "$pid" && "$pid" != 0 && -r "/proc/$pid/environ" ]] || return 0
-    tr '\0' '\n' < "/proc/$pid/environ" | sed -n "s/^$2=//p" | tail -n 1
+# The core checkout recorded in the component registry, if any.
+registered_core() {
+    python3 - <<'PY' 2>/dev/null || true
+import json, os
+base = os.environ.get("TELEGRAM_AI_CONFIG_DIR") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "telegram-ai")
+with open(os.path.join(base, "registry.json"), encoding="utf-8") as handle:
+    print(json.load(handle)["components"]["core"]["path"])
+PY
 }
 
 echo "== Codex Jarvis setup =="
@@ -60,67 +65,56 @@ need python3
 need systemctl
 need codex
 [[ $EUID -eq 0 ]] || need sudo
-python3 -c 'import ensurepip, venv' >/dev/null 2>&1 \
-    || die "python3 venv support is missing (Debian/Ubuntu: sudo apt install python3-venv)"
 
 codex login status >/dev/null 2>&1 || die "Codex is not logged in; run: codex login"
 echo "Codex account: authenticated"
 
-# --- Shared relay ------------------------------------------------------------
-# Checked before anything is installed, so a missing relay fails fast instead
-# of leaving a worker that can never receive a request.
-QUEUE_SERVICE_NAME="${JARVIS_RELAY_QUEUE_SERVICE:-jarvis-ask-cmd-queue.service}"
-RELAY_ACTIVE=0
-systemctl is-active --quiet "$QUEUE_SERVICE_NAME" 2>/dev/null && RELAY_ACTIVE=1
-
-DEFAULT_CLAUDE_JARVIS_DIR="${CLAUDE_JARVIS_CHECKOUT:-}"
-if [[ -z "$DEFAULT_CLAUDE_JARVIS_DIR" ]]; then
-    for candidate in "$ROOT/../claude-ask" "$ROOT/../claude-jarvis" "$HOME/claude-ask" "$HOME/claude-jarvis"; do
-        if [[ -f "$candidate/cmd_queue.py" ]]; then
-            DEFAULT_CLAUDE_JARVIS_DIR="$(cd "$candidate" && pwd)"
-            break
-        fi
-    done
-fi
-ask CLAUDE_JARVIS_CHECKOUT "ClaudeAsk checkout that provides the relay [${DEFAULT_CLAUDE_JARVIS_DIR:-not found}]: " "$DEFAULT_CLAUDE_JARVIS_DIR"
-CLAUDE_JARVIS_DIR="$CLAUDE_JARVIS_CHECKOUT"
-RELAY_PYTHON="$CLAUDE_JARVIS_DIR/.venv/bin/python"
-if [[ ! -f "$CLAUDE_JARVIS_DIR/cmd_queue.py" || ! -x "$RELAY_PYTHON" ]] || (( ! RELAY_ACTIVE )); then
-    die "the shared queue relay is not installed on this host.
-CodexAsk exchanges queue files with cmd_queue.py from the ClaudeAsk checkout,
-so that relay has to be installed and running here first:
-  git clone https://github.com/maleon17/claude-ask.git \"$(dirname "$ROOT")/claude-ask\"
-  cd \"$(dirname "$ROOT")/claude-ask\" && ./setup.sh
-Then re-run this script (CLAUDE_JARVIS_CHECKOUT=<path> if it lives elsewhere)."
-fi
-
-# The running relay is the source of truth for where its credentials and
-# queues live; a token or queue item written anywhere else is invisible to it.
-for name in JARVIS_RELAY_CONFIG_DIR JARVIS_RELAY_TOKENS_FILE JARVIS_RELAY_OWNERS_FILE JARVIS_STATE_DIR; do
-    live_value="$(running_env "$QUEUE_SERVICE_NAME" "$name")"
-    [[ -n "$live_value" ]] && export "$name=$live_value"
+# --- telegram-ai-core: relay, Telegram-action MCP server, userbot module -----
+CORE_REPO_URL="${TELEGRAM_AI_CORE_REPO:-https://github.com/maleon17/telegram-ai-core.git}"
+CORE_DIR=""
+for candidate in "${TELEGRAM_AI_CORE_DIR:-}" "$(registered_core)" "$ROOT/../telegram-ai-core" "$HOME/telegram-ai-core"; do
+    if [[ -n "$candidate" && -f "$candidate/install_relay.sh" && -f "$candidate/telegram_actions_mcp.py" ]]; then
+        CORE_DIR="$(cd "$candidate" && pwd)"
+        break
+    fi
 done
-RELAY_CONFIG_DIR="${JARVIS_RELAY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/telegram-ai}"
-STATE_DIR="${JARVIS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/telegram-ai}"
-export JARVIS_RELAY_CONFIG_DIR="$RELAY_CONFIG_DIR" JARVIS_STATE_DIR="$STATE_DIR"
+if [[ -z "$CORE_DIR" ]]; then
+    need git
+    CORE_DIR="$(dirname "$ROOT")/telegram-ai-core"
+    echo "Fetching telegram-ai-core into $CORE_DIR"
+    git clone --quiet --depth 1 "$CORE_REPO_URL" "$CORE_DIR" \
+        || die "could not clone $CORE_REPO_URL (set TELEGRAM_AI_CORE_DIR to an existing checkout)"
+fi
+echo "telegram-ai-core: $CORE_DIR"
+
+# Installs the relay's virtualenv and service if they are not there yet; a
+# relay that is already running is left alone.
+"$CORE_DIR/install_relay.sh"
+CORE_PYTHON="$CORE_DIR/.venv/bin/python"
+[[ -x "$CORE_PYTHON" ]] || die "telegram-ai-core has no virtualenv after install_relay.sh"
+core_registry() { "$CORE_PYTHON" "$CORE_DIR/registry.py" "$@"; }
+
+# The relay (installed above, possibly long ago) is the source of truth for
+# where credentials and queues live.
+RELAY_CONFIG_DIR="$(core_registry get relay config_dir)"
+STATE_DIR="$(core_registry get relay state_dir)"
+[[ -n "$RELAY_CONFIG_DIR" && -n "$STATE_DIR" ]] || die "the relay is not registered; run $CORE_DIR/install_relay.sh"
 WORKER_TOKEN_ENV="$RELAY_CONFIG_DIR/relay-token-codex.env"
 
 INSTALL_USER="$(id -un)"
 INSTALL_DIR="$ROOT"
-ask CODEX_JARVIS_CWD "Codex workspace [$HOME]: " "$HOME"
+# A dedicated, initially empty directory by default: Codex obeys the AGENTS.md
+# of its working directory, and one written for other work (for example in
+# your home directory) would otherwise leak into every Jarvis answer.
+ask CODEX_JARVIS_CWD "Codex workspace [$ROOT/workspace]: " "$ROOT/workspace"
 CODEX_CWD="$CODEX_JARVIS_CWD"
+[[ "$CODEX_CWD" == "$ROOT/workspace" ]] && mkdir -p "$CODEX_CWD"
 [[ -d "$CODEX_CWD" ]] || die "workspace does not exist: $CODEX_CWD"
 CODEX_CWD="$(cd "$CODEX_CWD" && pwd)"
 
 ask CODEX_JARVIS_HOME_DIR "Dedicated CODEX_HOME [$ROOT/codex_home]: " "$ROOT/codex_home"
 CODEX_HOME_DIR="$(mkdir -p "$CODEX_JARVIS_HOME_DIR" && cd "$CODEX_JARVIS_HOME_DIR" && pwd)"
 chmod 700 "$CODEX_HOME_DIR"
-
-MCP_VENV="${CODEX_JARVIS_MCP_VENV:-$ROOT/.venv}"
-echo "Installing MCP dependencies into $MCP_VENV"
-python3 -m venv "$MCP_VENV"
-"$MCP_VENV/bin/python" -m pip install --quiet --upgrade pip
-"$MCP_VENV/bin/python" -m pip install --quiet -r requirements-mcp.txt
 
 AUTH_SOURCE="${CODEX_JARVIS_AUTH_FILE:-$HOME/.codex/auth.json}"
 [[ -f "$AUTH_SOURCE" ]] || die "Codex auth file not found: $AUTH_SOURCE"
@@ -130,8 +124,8 @@ fi
 
 GENERATED_CONFIG="$(mktemp)"
 sed \
-    -e "s|__MCP_PYTHON__|$MCP_VENV/bin/python|g" \
-    -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
+    -e "s|__MCP_PYTHON__|$CORE_PYTHON|g" \
+    -e "s|__CORE_DIR__|$CORE_DIR|g" \
     codex-config.toml.example > "$GENERATED_CONFIG"
 if [[ ! -e "$CODEX_HOME_DIR/config.toml" ]]; then
     install -m 600 "$GENERATED_CONFIG" "$CODEX_HOME_DIR/config.toml"
@@ -154,7 +148,7 @@ sed \
     -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
     -e "s|__CODEX_HOME__|$CODEX_HOME_DIR|g" \
     -e "s|__CODEX_CWD__|$CODEX_CWD|g" \
-    -e "s|__RELAY_CONFIG_DIR__|$RELAY_CONFIG_DIR|g" \
+    -e "s|__CONFIG_DIR__|$RELAY_CONFIG_DIR|g" \
     -e "s|__STATE_DIR__|$STATE_DIR|g" \
     codex-jarvis.service.example > "$UNIT_FILE"
 
@@ -163,8 +157,8 @@ cat <<'NOTE'
 
 Note: the Jarvis persona ships with profanity and dark humour enabled by
 default - a deliberately informal, entertainment-leaning bot. To tone that
-down, edit the persona after setup with the  .persona  command in Telegram
-(CodexAsk: .xpersona), or edit personas/<instance>.md directly (re-read
+down, edit the persona after setup with the  .xpersona  command in Telegram
+(ClaudeAsk: .persona), or edit personas/<instance>.md directly (re-read
 automatically on change, no restart).
 NOTE
 
@@ -201,13 +195,10 @@ env_file_set "$JARVIS_ENV" JARVIS_NOMATS_CHAT_IDS "$J_NOMATS"
 env_file_set "$JARVIS_ENV" JARVIS_PERSONA_DIR "$J_PERSONA_DIR"
 chmod 600 "$JARVIS_ENV"
 echo "Wrote $JARVIS_ENV (git-ignored; the worker loads it via EnvironmentFile=)."
-RELAY_XPERSONA_DIR="$(running_env "$QUEUE_SERVICE_NAME" JARVIS_XPERSONA_DIR)"
-if [[ "$RELAY_XPERSONA_DIR" != "$J_PERSONA_DIR" ]]; then
-    echo "NOTE: .xpersona edits go through the relay, which writes to its own"
-    echo "\$JARVIS_XPERSONA_DIR (currently: ${RELAY_XPERSONA_DIR:-the ClaudeAsk persona directory})."
-    echo "Add  JARVIS_XPERSONA_DIR=$J_PERSONA_DIR  to $CLAUDE_JARVIS_DIR/jarvis.env"
-    echo "and restart $QUEUE_SERVICE_NAME once no request is in flight."
-fi
+
+# Lets the relay serve .xpersona from this checkout and the neighbours find it.
+core_registry register codex-ask "path=$ROOT" "unit=$SERVICE_NAME.service" \
+    "persona_dir=$J_PERSONA_DIR" "owner_name=$J_OWNER_NAME" "owner_tg_id=$J_OWNER_TG_ID"
 
 WORKER_ACTIVE=0
 systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null && WORKER_ACTIVE=1
@@ -223,11 +214,9 @@ if [[ -n "$INSTANCE_ID" ]]; then
     OWNER_TG_ID="$(printf '%s' "$JARVIS_INSTANCE_OWNER_TG_ID" | tr -cd '0-9')"
     [[ -n "$OWNER_TG_ID" ]] || die "owner Telegram ID is required to authorize instance '$INSTANCE_ID'"
 
-    # The relay's own interpreter and user: the maps must stay readable by it.
-    "$RELAY_PYTHON" "$CLAUDE_JARVIS_DIR/cmd_queue.py" --set-owner "$INSTANCE_ID" "$OWNER_TG_ID"
-    RELAY_TOKEN="$("$RELAY_PYTHON" "$CLAUDE_JARVIS_DIR/cmd_queue.py" --add-token "$INSTANCE_ID" --worker-env "$WORKER_TOKEN_ENV")"
+    RELAY_TOKEN="$("$CORE_DIR/register_instance.sh" "$INSTANCE_ID" "$OWNER_TG_ID" "$WORKER_TOKEN_ENV")"
     echo "Registered owner $OWNER_TG_ID and a new token for instance '$INSTANCE_ID' in $RELAY_CONFIG_DIR"
-    echo "(the running relay picks this up by itself; no restart needed)."
+    echo "(a running relay picks this up by itself; no restart needed)."
     if (( WORKER_ACTIVE )); then
         echo "NOTE: ${SERVICE_NAME}.service is already running and reads $WORKER_TOKEN_ENV"
         echo "only at start. Restart it once no .xask is in flight:"
@@ -235,10 +224,11 @@ if [[ -n "$INSTANCE_ID" ]]; then
     fi
 else
     echo "No instance ID given; skipping relay token generation."
-    echo "Re-run setup.sh once you're ready, or see 'Relay credentials' in the README."
+    echo "Re-run setup.sh once you're ready, or see 'Relay authentication' in the"
+    echo "telegram-ai-core README to do it by hand."
 fi
 
-python3 -m py_compile app_server.py codex_ask_watcher.py
+python3 -m py_compile app_server.py codex_ask_watcher.py codex_ask.py jarvis_ask.py
 if (( WORKER_ACTIVE )); then
     echo "${SERVICE_NAME}.service is already active; leaving it running."
 else
@@ -256,6 +246,7 @@ if [[ -n "$INSTANCE_ID" && -n "$RELAY_TOKEN" ]]; then
     echo "reply .lm to each, then run (in a private chat - the token is shown once):"
     echo "  .xasknet token $RELAY_TOKEN"
     echo "  .xasknet local $INSTANCE_ID"
+    echo "  .xasknet check"
 else
     echo "Backend installed. Re-run setup.sh with an instance ID to register one, then"
     echo "upload jarvis_ask.py and codex_ask.py to the Telethon userbot, reply .lm to"
@@ -290,4 +281,4 @@ if [ -t 0 ]; then
     esac
 fi
 
-bash "$ROOT/scripts/setup_userbot_network.sh" codex_ask.py
+bash "$CORE_DIR/scripts/setup_userbot_network.sh" codex_ask.py

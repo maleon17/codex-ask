@@ -63,15 +63,12 @@ def _is_internal_tool_result(value):
     return isinstance(value, str) and value.startswith(INTERNAL_TOOL_RESULT_PREFIX)
 
 
-# Deliberately NOT "/home/mishin": Codex only checks the exact given cwd for
-# an AGENTS.md, not ancestor directories, but /home/mishin/AGENTS.md has a
-# "read BRIDGE_PROJECT_HANDOFF.md at the start of every session" rule meant
-# for actual infra-editing work -- with cwd=/home/mishin that rule fired (and
-# got obeyed) on every fresh app-server thread, including every single
-# non-persistent /xclassify call, burning a real file read for no reason on
-# ordinary chat/trigger turns. Read access to the rest of the filesystem is
+# Deliberately NOT the home directory by default: Codex reads the AGENTS.md of
+# the exact cwd it is given (not of ancestor directories), so a home-directory
+# AGENTS.md written for real engineering work would be obeyed on every persona
+# turn and every /xclassify call. Read access to the rest of the filesystem is
 # unaffected (only writable_roots is cwd-scoped), so nothing is lost.
-CODEX_CWD = os.environ.get("CODEX_JARVIS_CWD", "/home/mishin/codex-jarvis")
+CODEX_CWD = os.environ.get("CODEX_JARVIS_CWD", os.path.dirname(os.path.abspath(__file__)))
 CODEX_SANDBOX = os.environ.get("CODEX_JARVIS_SANDBOX", "danger-full-access")
 CODEX_MODEL = os.environ.get("CODEX_JARVIS_MODEL", "gpt-5.6-luna")
 CODEX_EFFORT = os.environ.get("CODEX_JARVIS_EFFORT", "low")
@@ -94,7 +91,7 @@ CLASSIFY_PROMPT = (
     "честно, когда действительно есть сомнение, а не только 'да'/'нет' "
     "для перестраховки."
 )
-DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "andrey_codex")
+DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "default")
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
 TURN_INTERRUPT_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_INTERRUPT_TIMEOUT", "15"))
@@ -955,13 +952,19 @@ class ChatSession:
                 "generated_image_paths": state.generated_image_paths,
             })
         except Exception as exc:
-            log(f"{self.instance_id}:{self.chat_id} request failed: {exc}")
-            _atomic_json(RESULT_DIR / f"{req_id}.json", {
-                "done": True,
-                "request_id": req_id,
-                "answer": f"⚠️ Ошибка Codex: {_short(str(exc), 1800)}",
-                "thoughts": [],
-            })
+            if state.cancelled:
+                # Stopped while the turn was still being set up: whatever that
+                # setup then failed with is not what the user should be told.
+                log(f"{self.instance_id}:{self.chat_id} request {req_id} stopped on request ({exc})")
+                _atomic_json(RESULT_DIR / f"{req_id}.json", _cancelled_result(req_id))
+            else:
+                log(f"{self.instance_id}:{self.chat_id} request failed: {exc}")
+                _atomic_json(RESULT_DIR / f"{req_id}.json", {
+                    "done": True,
+                    "request_id": req_id,
+                    "answer": f"⚠️ Ошибка Codex: {_short(str(exc), 1800)}",
+                    "thoughts": [],
+                })
         finally:
             with self.lock:
                 if self.active is state:
