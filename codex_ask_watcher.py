@@ -254,6 +254,19 @@ def _atomic_json(path: Path, value: dict) -> None:
         os.close(directory_fd)
 
 
+# The relay drops "<request_id>.cancel" into the queue directory when the
+# userbot asks to stop a request this worker has already claimed.
+CANCEL_MARKER_TTL_S = 600
+
+
+def _cancel_marker(req_id: str) -> Path:
+    return QUEUE_DIR / f"{req_id}.cancel"
+
+
+def _cancelled_result(req_id: str) -> dict:
+    return {"done": True, "request_id": req_id, "cancelled": True, "answer": "", "thoughts": []}
+
+
 def _tool_context_path(instance_id: str, chat_id: str) -> Path:
     key = f"{instance_id}\0{chat_id}".encode("utf-8")
     return TOOL_CONTEXT_DIR / f"{hashlib.sha256(key).hexdigest()}.json"
@@ -478,6 +491,9 @@ class TurnState:
         self.current_item: dict | None = None
         self.active_item_id: str | None = None
         self.error: str | None = None
+        # Set by ChatSession.cancel() (.xstop): the turn is to be interrupted
+        # and reported as cancelled, never as an answer or an error.
+        self.cancelled = False
         self.last_progress_at = 0.0
         self.last_progress = ""
 
@@ -824,6 +840,11 @@ class ChatSession:
                 "done": True, "request_id": req_id, "answer": "Пустой вопрос.", "thoughts": [],
             })
             return
+        if _cancel_marker(req_id).exists():
+            # Stopped while it was waiting for this chat's previous turn.
+            _atomic_json(RESULT_DIR / f"{req_id}.json", _cancelled_result(req_id))
+            _cancel_marker(req_id).unlink(missing_ok=True)
+            return
         with self.lock:
             if self.resetting:
                 raise AppServerError("session was reset")
@@ -889,7 +910,22 @@ class ChatSession:
                 state.pending_notifications = []
                 for deferred_method, deferred_params in deferred:
                     self._notification(deferred_method, deferred_params)
-            if not state.done.wait(TURN_TIMEOUT):
+            finished = state.done.wait(TURN_TIMEOUT)
+            if state.cancelled:
+                # .xstop: interrupt the turn for real (a turn left running
+                # would keep spending the subscription and hold the thread).
+                try:
+                    client.request("turn/interrupt", {
+                        "threadId": thread_id,
+                        **({"turnId": state.turn_id} if state.turn_id else {}),
+                    }, timeout=TURN_INTERRUPT_TIMEOUT)
+                except Exception as exc:
+                    log(f"{self.instance_id}:{self.chat_id} interrupt on stop failed: {exc}")
+                    client.close()
+                log(f"{self.instance_id}:{self.chat_id} request {req_id} stopped on request")
+                _atomic_json(RESULT_DIR / f"{req_id}.json", _cancelled_result(req_id))
+                return
+            if not finished:
                 try:
                     client.request("turn/interrupt", {
                         "threadId": thread_id,
@@ -932,6 +968,7 @@ class ChatSession:
                     self.active = None
             if mode == "classify":
                 client.close()
+            _cancel_marker(req_id).unlink(missing_ok=True)
             try:
                 with self.tool_context_path.open(encoding="utf-8") as handle:
                     context = json.load(handle)
@@ -939,6 +976,16 @@ class ChatSession:
                     self.tool_context_path.unlink()
             except (FileNotFoundError, OSError, ValueError, TypeError):
                 pass
+
+    def cancel(self, req_id: str) -> bool:
+        """Stop the turn of one request if it is the active one."""
+        with self.lock:
+            state = self.active
+            if state is None or state.request_id != req_id or state.cancelled:
+                return False
+            state.cancelled = True
+        state.done.set()  # wake _handle, which interrupts and reports it
+        return True
 
     def close(self) -> None:
         with self.lock:
@@ -1061,6 +1108,24 @@ class Worker:
             pass
         log(f"reset {instance_id}:{chat_id}")
 
+    def _apply_cancel_markers(self, now: float | None = None) -> None:
+        """Act on the relay's "<request_id>.cancel" markers. A request that
+        has not started yet is handled by _handle itself when its turn comes;
+        a marker nobody consumed is dropped after a while."""
+        now = time.time() if now is None else now
+        for marker in QUEUE_DIR.glob("*.cancel"):
+            req_id = marker.name[:-len(".cancel")]
+            with self.sessions_lock:
+                sessions = list(self.sessions.values())
+            for session in sessions:
+                if session.cancel(req_id):
+                    break
+            try:
+                if now - marker.stat().st_mtime > CANCEL_MARKER_TTL_S:
+                    marker.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+
     def _process_request(self, path: Path) -> None:
         processing = path.with_suffix(path.suffix + ".processing")
         try:
@@ -1096,6 +1161,7 @@ class Worker:
                     self._process_reset(reset)
                 for path in sorted(QUEUE_DIR.glob("*.json")):
                     self.admit(path)
+                self._apply_cancel_markers()
                 self._cleanup_idle_sessions()
             except Exception as exc:
                 log(f"poll error: {exc}")
