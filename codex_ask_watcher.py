@@ -70,7 +70,7 @@ def _is_internal_tool_result(value):
 # unaffected (only writable_roots is cwd-scoped), so nothing is lost.
 CODEX_CWD = os.environ.get("CODEX_JARVIS_CWD", os.path.dirname(os.path.abspath(__file__)))
 CODEX_SANDBOX = os.environ.get("CODEX_JARVIS_SANDBOX", "danger-full-access")
-CODEX_MODEL = os.environ.get("CODEX_JARVIS_MODEL", "gpt-5.6-luna")
+CODEX_MODEL = os.environ.get("CODEX_JARVIS_MODEL", "gpt-6-luna")
 CODEX_EFFORT = os.environ.get("CODEX_JARVIS_EFFORT", "low")
 # Tier 1 trigger classify (mirrors claude_watcher.py's CLASSIFY_MODEL for the
 # "verify" trigger gate -- the cheap/fast tier for CodexAsk's own triggers).
