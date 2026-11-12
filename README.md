@@ -1,70 +1,45 @@
+<div align="center">
+
 # CodexAsk
 
-> Part of **[Telegram AI](https://github.com/maleon17/telegram-ai)** — Claude/Codex from dedicated bots or directly inside your Telegram account.
+**Codex inside your own Telegram chats — type `.xask`, and the answer appears in place of your message.**
 
-**Run Codex from ordinary Telegram chats through your own account.**
+[Install](#install) · [Commands](#commands) · [Triggers](#triggers-the-assistant-that-watches-a-chat) · [Remote userbot](#userbot-on-another-server) · [Troubleshooting](#troubleshooting)
 
-CodexAsk combines a Telethon/Hikka userbot module with a persistent Codex App Server worker. Type `.xask` in a conversation and the request goes to the backend while the userbot remains the controlled execution point for real Telegram actions.
+Part of **[Telegram AI](https://github.com/maleon17/telegram-ai)** — Claude Code and Codex from Telegram, on your own subscription.
 
-This is not **[codex-telegram-bridge](https://github.com/maleon17/codex-telegram-bridge)**. That project gives Codex a dedicated Bot API chat. CodexAsk puts the agent inside the Telegram account and conversations you already use.
+</div>
 
-## Architecture
+---
+
+CodexAsk is a module for a Telegram **userbot** (your own account, automated) plus a Codex backend on your server. In any chat you write `.xask what does this error mean?` — your message turns into a live progress view and then into the answer, as if you had typed it yourself. There is no separate bot to talk to: it lives in the conversations you already have.
 
 ```mermaid
 flowchart LR
-    C["Telegram chat<br/>.xask"] --> U["CodexAsk<br/>Telethon module"]
-    U --> R["Authenticated<br/>queue relay"]
-    R --> W["Persistent<br/>Codex App Server worker"]
-    W --> R --> U
-    W --> M["Telegram actions MCP"]
-    M --> R --> U
-    U <--> T["Live Telethon session"]
+    C["Any chat<br/>.xask …"] --> U["CodexAsk module<br/>(your userbot)"]
+    U <--> R["Queue relay"]
+    R <--> W["Codex App Server<br/>on your server"]
+    W -. "Telegram actions" .-> R -.-> U
 ```
 
-Telegram actions are not imaginary model side effects. MCP calls are queued back to the loaded module, executed through its real Telethon session, and return a real tool result before the final agent response is produced.
+It runs on your ChatGPT/Codex subscription through the official Codex CLI, with a long-lived Codex App Server behind it. The backend never holds your Telegram account: when Codex wants to *do* something in Telegram, the request goes back to your userbot, which performs it and reports the real result.
 
-## What is included
+> Looking for a dedicated bot chat instead? That is **[Codex Telegram Bridge](https://github.com/maleon17/codex-telegram-bridge)**. Prefer Claude? **[ClaudeAsk](https://github.com/maleon17/claude-ask)** is the same thing with `.ask` — the `x` prefix lets both run side by side.
 
-- `codex_ask_watcher.py` — persistent Codex App Server worker
-- `app_server.py` — minimal JSONL client for Codex App Server
-- `codex_ask.py` — the loadable `CodexAsk` module (generated; see below)
-- `jarvis_ask.py` — the `JarvisAsk` coordinator module
-- `personas/` — the persona template
-- `setup.sh` and `codex-jarvis.service.example` — worker installation
+## What it can do
 
-The queue relay, the Telegram-action MCP server and the source of both userbot modules live in **[telegram-ai-core](https://github.com/maleon17/telegram-ai-core)**, shared with [ClaudeAsk](https://github.com/maleon17/claude-ask). `setup.sh` fetches it for you. `codex_ask.py` and `jarvis_ask.py` here are copies built from there — do not edit them by hand.
+- **Answers in place**, in private chats and groups, with your chat's history as context.
+- **Real Telegram actions** in your account: read and search chat history, send messages and files, create groups and channels, invite people, manage contacts, forward messages.
+- **Sees attachments**: replies to photos, documents, stickers and voice messages (voice is transcribed); images Codex generates are sent back automatically.
+- **Remembers each chat** — a persistent Codex thread per chat; `.xnew` starts over.
+- **Triggers** — rules that watch a chat and react on their own (see below).
+- **Stoppable** — `.xstop` interrupts a turn that is taking too long.
 
-## Commands and isolation
+## Install
 
-CodexAsk deliberately uses `x`-prefixed commands so it can coexist with ClaudeAsk:
+**You need:** a Linux server with `systemd`, `git` and Python 3.10+; the [Codex CLI](https://developers.openai.com/codex/cli/) logged in with `codex login`; and a [Heroku](https://github.com/coddrago/Heroku) userbot — the installer can create one for you in Docker.
 
-- `.xask <question>` — ask Codex
-- `.xsearch <word>`, `.xtranslate <text>`
-- `.xstop` — stop the request in this chat (as a reply to its message: only that one)
-- `.xnew` — start a fresh Codex context
-- `.xpersona` — view or replace the persona
-- `.xasknet` — connection settings; `.xasknet check` verifies them
-
-Codex history has its own `CodexAsk` namespace and `instance_id`.
-
-Trigger storage is shared with ClaudeAsk. When both userbot modules and the `JarvisAsk` coordinator are loaded, each module's watcher calls the coordinator; it selects the engine from a trigger's `engine` field. One incoming message then produces one coordinated action rather than duplicate Claude/Codex reactions.
-
-The coordinator's action priority is:
-
-`delete > confirm > post > agent > reply`
-
-Fallback occurs only on explicit structured backend failures. Timeouts are reported without silently switching engines, a request stopped with `.xstop` is never retried on the other engine, and agent/reply triggers fail closed.
-
-## Setup
-
-Requirements:
-
-- Linux with Python 3.10+ (and its `venv` module), `git`
-- `systemd` and `sudo` (only to install the service units)
-- Codex CLI installed and authenticated with `codex login`
-- a supported Telethon/Hikka userbot; this project targets [Heroku](https://github.com/coddrago/Heroku)
-
-Nothing else from this ecosystem has to be installed first. Heroku may run on the backend host or in Docker on a separate host.
+**1. Install the backend:**
 
 ```bash
 git clone https://github.com/maleon17/codex-ask.git
@@ -72,109 +47,123 @@ cd codex-ask
 ./setup.sh
 ```
 
-`setup.sh` does everything on the backend side in one pass:
+The installer fetches the shared [telegram-ai-core](https://github.com/maleon17/telegram-ai-core) next to this folder (or reuses the relay ClaudeAsk already installed), starts the Codex worker as a service, and asks for:
 
-- finds `telegram-ai-core` next to this checkout, or clones it there, and installs the queue relay from it (a relay that is already running — for example one ClaudeAsk installed — is reused)
-- creates a dedicated `CODEX_HOME` with its `config.toml` (an existing one is kept; the fresh one is written next to it as `config.toml.new`) and links authentication from `$HOME/.codex/auth.json` (never copied into Git)
-- gives Codex a dedicated, initially empty working directory by default, so an `AGENTS.md` written for other work does not leak into Jarvis's answers
-- writes the persona env (`jarvis.env`), keeping any other keys already in that file
-- registers an owner and generates a relay token for an `instance_id` you choose (1–64 letters/digits/`_`/`-`, starting with a letter or digit), then prints the exact `.xasknet` commands to paste into Telegram
-- installs and starts the worker's systemd service (skipping it if a service by that name is already active, so re-running to add a second instance is safe)
-- optionally builds the graphify code map
-- optionally builds and starts a local Docker userbot container (Heroku image, first-run Telegram sign-in included), or configures Tailscale on this host for a remote userbot
+- your name and Telegram ID (for the persona — get the ID from [@userinfobot](https://t.me/userinfobot));
+- an **instance ID** — any short name for your userbot, like `mybot` (use the same one as for ClaudeAsk if both live in one userbot).
 
-Runtime paths such as `codex_home/`, `state/` and `workspace/` are gitignored. Every question can also be answered through environment variables (listed at the top of `setup.sh`), so the install can run unattended. The only things it cannot do for you: the Codex login itself, and anything that has to happen inside Telegram (loading the modules, running `.xasknet`, the userbot's own first-time Telegram sign-in if you're not using the Docker option).
+Codex gets its own empty working folder (`workspace/`) by default, so an `AGENTS.md` written for other work does not leak into its answers.
 
-## Load the userbot modules
+At the end it prints the three commands you will paste into Telegram — **copy them now**, the token is shown only once.
 
-Load `jarvis_ask.py` first, then `codex_ask.py`, as Telegram documents into the userbot. Reply to each with:
+**2. Get a userbot.** The installer's last question offers to create one: answer `1` for a local Docker userbot (you will sign in to Telegram once, right in the terminal), `2` if your userbot runs on another server (see [below](#userbot-on-another-server)), or `n` if you already have one on this server.
 
-```text
-.lm
-```
-
-Then, in a private chat, run the commands `setup.sh` printed:
+**3. Load the modules and connect them.** Send `jarvis_ask.py` and then `codex_ask.py` as files to your **Saved Messages**, reply to each with `.lm`, then in the same private chat run the commands the installer printed:
 
 ```text
 .xasknet token <token>
-.xasknet local <instance_id>
+.xasknet local mybot
 .xasknet check
 ```
 
-or, for a backend on another host:
+`.xasknet check` should answer ✅. That's it — try `.xask hello` in any chat.
 
-```text
-.xasknet tailnet <instance_id> <backend_url>
-```
+> Until the module is configured, every command answers with these setup instructions. All settings are also in the userbot's own editor: `.cfg CodexAsk`.
 
-The token is shown once and stored nowhere else in plaintext; if you lost it, re-run `setup.sh` to mint another one for the same instance (older tokens stay valid until revoked). A single userbot can share one `instance_id` between ClaudeAsk and CodexAsk; separate userbots each need their own.
+## Commands
 
-Until it is configured, the module answers every command with these setup instructions instead of guessing a backend. The same settings are available in the userbot's own config editor: `.cfg CodexAsk`.
+| Command | What it does |
+|---|---|
+| `.xask <question>` | Ask Codex; reply to a message or file to include it |
+| `.xsearch <word>` | Find messages in this chat and answer about them |
+| `.xtranslate <text>` | Translate into Russian |
+| `.xstop` | Stop the running request in this chat (reply to its message to stop just that one) |
+| `.xnew` | Forget this chat's conversation and start fresh |
+| `.xpersona` | View or edit the assistant's persona; reply to a file or text to replace it, `.xpersona reset` to restore |
+| `.xasknet` | Connection settings: `token`, `local`, `tailnet`, `custom`, `check`, `testbot` |
 
-### Remote userbot over Tailscale
+## Triggers: the assistant that watches a chat
 
-The **remote userbot container** must also have `tailscale` and `tailscaled` installed and join the same tailnet. Install the package in its Docker image so container recreation does not remove the binaries. For an Ubuntu/Debian-based image, add a build step like this before starting Heroku:
+Ask in plain words — *"in this group, delete ads and messages with buttons"*, *"tell me when Alex replies"*, *"answer Alex for me until the question is settled"* — and Codex registers a trigger: a cheap filter (keywords, links, buttons, any message) plus what to do (notify you, reply, delete, post to a topic, run an agent, or ask you to confirm with buttons). Fuzzy conditions like "is this an ad?" are checked by a small model only for messages that passed the filter.
 
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && curl -fsSL https://tailscale.com/install.sh -o /tmp/tailscale-install.sh \
-    && sh /tmp/tailscale-install.sh \
-    && rm /tmp/tailscale-install.sh
-```
+Triggers are shared with ClaudeAsk, and each one says which engine runs it. With the `JarvisAsk` coordinator (`jarvis_ask.py`) loaded, one incoming message fires one coordinated action — never a duplicate from each assistant. Priority: `delete > confirm > post > agent > reply`. If one engine fails outright, the other takes over; a timeout or a `.xstop` is never silently retried.
 
-The Ask module starts `tailscaled` in [userspace networking mode](https://tailscale.com/docs/concepts/userspace-networking) on module load, with an HTTP proxy at `localhost:1056`. It requires a persistent `/data` mount for `/data/tailscale/tailscaled.state`. Set `.xasknet tailnet <instance_id> http://<backend-tailnet-ip>:9092` and `.xasknet token <token>`, then reload the module so `client_ready` starts the local Tailscale proxy. Run the first interactive login inside that container:
+Triggers run unattended, so they are deliberately limited: by default a trigger may only send a message to the chat it fired in, and it can never hand tasks to other agents.
 
-```bash
-docker exec -it <userbot-container> tailscale --socket=/var/run/tailscale/tailscaled.sock up
-```
+## Userbot on another server
 
-Open the URL Tailscale prints and approve the device. The module can restart a previously authenticated daemon, but it cannot install Tailscale or perform the first login for you.
+If your userbot runs elsewhere, the two servers talk over [Tailscale](https://tailscale.com):
 
-## Relay credentials
+1. On **this** server, answer `2` to the installer's last question — it installs Tailscale, logs this server into your tailnet and lets the relay listen there.
+2. In the **userbot's container**, Tailscale must be installed (add it to its image, so it survives a rebuild):
+   ```dockerfile
+   RUN curl -fsSL https://tailscale.com/install.sh -o /tmp/ts.sh && sh /tmp/ts.sh && rm /tmp/ts.sh
+   ```
+   The container needs a persistent `/data` volume; the module starts Tailscale there on every load.
+3. Connect the module and log the container in once:
+   ```text
+   .xasknet token <token>
+   .xasknet tailnet mybot http://<this-server-tailnet-ip>:9092
+   ```
+   ```bash
+   docker exec -it <userbot-container> tailscale --socket=/var/run/tailscale/tailscaled.sock up
+   ```
+   Open the printed link to approve the device, then run `.xasknet check`.
 
-Each instance uses a bearer token. `.xasknet token` stores it in the module config and never displays it afterward.
+## Troubleshooting
 
-The worker's own Telegram MCP client authenticates to the relay with `JARVIS_RELAY_TOKENS_JSON` (an `instance_id` → token map). `setup.sh` writes it to `relay-token-codex.env` in the shared configuration directory (`~/.config/telegram-ai` by default, mode `0600`), and the worker's systemd unit loads it through `EnvironmentFile=`. Do not put relay tokens into `codex-config.toml` or commit them to the repository.
+| Symptom | What to check |
+|---|---|
+| `.xask` answers with setup instructions | The module is not configured yet: run the `.xasknet` commands from the installer |
+| `.xasknet check` fails | It names the problem: no route to the backend, a wrong token, or a token of another instance |
+| `setup.sh` says the relay is missing | It could not install telegram-ai-core: check `git` and network access, or set `TELEGRAM_AI_CORE_DIR` |
+| Stuck on "thinking" | `journalctl -u codex-jarvis -f` on the server; `.xstop` ends the request |
+| Telegram actions do nothing | `journalctl -u jarvis-ask-cmd-queue -f`; the userbot must be online to perform them |
+| Lost the token | Run `./setup.sh` again with the same instance ID — it issues a new one |
 
-Owners, tokens and the trust boundary are documented in [telegram-ai-core](https://github.com/maleon17/telegram-ai-core#relay-authentication).
+<details>
+<summary><b>Together with the rest of Telegram AI</b></summary>
 
-## Updating
+When other [Telegram AI](https://github.com/maleon17/telegram-ai) parts are installed on the same server, they connect on their own:
+
+- **ClaudeAsk** shares the relay and the trigger rules (see the coordinator above).
+- **Claude / Codex Telegram Bridge**: in your own `.xask` you can hand a bigger task to your coding agent in the bridge (it has your projects and no ten-minute limit) and get its answer back. Only the instance's owner can do this — never a trigger or another person. And in your bridge chat, the agent can act in your Telegram account through this userbot.
+
+</details>
+
+<details>
+<summary><b>Updating</b></summary>
 
 ```bash
 git pull && git -C ../telegram-ai-core pull
-sudo systemctl restart codex-jarvis     # once no .xask is in flight
+sudo systemctl restart codex-jarvis   # when no .xask is running
 ```
 
-Reload the module in the userbot with:
+Reload the module in the userbot:
 
 ```text
 .dlm https://raw.githubusercontent.com/maleon17/codex-ask/main/codex_ask.py
 ```
 
-Settings persist in the userbot database.
+Settings survive module updates. `codex_ask.py` and `jarvis_ask.py` are built in telegram-ai-core — change them there, not here.
 
-## Verification
+</details>
 
-```bash
-./scripts/run_tests.sh
-systemctl status codex-jarvis
-journalctl -u codex-jarvis -f
-```
+<details>
+<summary><b>Settings, files and manual setup</b></summary>
 
-After loading the module, try `.xasknet check`, a plain `.xask`, `.xstop` on a long one, and at least one request that requires a real Telegram tool such as `list_triggers`, `read_history`, or `search_chat`.
+- **Voice transcription** uses Mistral's Voxtral API: put a key into `.cfg CodexAsk` → `mistral_api_key`.
+- **Persona**: `personas/<instance>.md` on the server (git-ignored), re-read automatically; the template is `personas/default.md.example`.
+- **Codex home**: `codex_home/` holds this worker's own `config.toml` (an existing one is kept on re-install; the fresh one is written next to it as `config.toml.new`) and a link to your Codex login.
+- **Worker settings** (environment): `CODEX_JARVIS_MODEL`, `CODEX_JARVIS_CLASSIFY_MODEL`, `CODEX_JARVIS_SANDBOX`, `CODEX_JARVIS_CWD`.
+- **Relay credentials, state directory, registry**: see [telegram-ai-core](https://github.com/maleon17/telegram-ai-core).
+- **Unattended install**: every `setup.sh` question can be answered through the environment — the variables are listed at the top of the script.
 
-The final response is produced only after the real tool result is available rather than trusting the model's own claim that an action happened. A strangely high bar for software, yet here we are.
+Manual setup: install the relay from telegram-ai-core (`./install_relay.sh`, `./register_instance.sh <instance> <owner_id> ~/.config/telegram-ai/relay-token-codex.env`), create `codex_home/` from `codex-config.toml.example`, then fill in the placeholders of `codex-jarvis.service.example` and enable it.
 
-The tests here cover the worker; the relay, the MCP server and the userbot modules are tested in telegram-ai-core.
+Tests: `./scripts/run_tests.sh` (the worker; the relay and modules are tested in telegram-ai-core).
 
-## Product boundaries
-
-- **CodexAsk**: this repository; the Codex worker and its installer.
-- **[telegram-ai-core](https://github.com/maleon17/telegram-ai-core)**: relay, Telegram-action MCP server, userbot module source — shared with ClaudeAsk.
-- **[ClaudeAsk](https://github.com/maleon17/claude-ask)**: the Claude backend for the same userbot workflow. Installable alone or next to this one.
-- **[Codex Telegram Bridge](https://github.com/maleon17/codex-telegram-bridge)**: independent Bot API frontend with its own sessions and runtime.
-
-See **[Telegram AI](https://github.com/maleon17/telegram-ai)** for the complete ecosystem.
+</details>
 
 ## License
 
