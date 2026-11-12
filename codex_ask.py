@@ -1,4 +1,4 @@
-# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl (sha256 de73c8d65b5b);
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl (sha256 653d9df12e67);
 # change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
 #
@@ -25,7 +25,7 @@
 #
 # GPL AGPLv3
 
-import asyncio, html, json, logging, os, re, secrets, shutil, subprocess, tempfile, time, urllib.error, urllib.request, urllib.parse, uuid
+import asyncio, hashlib, html, io, json, logging, os, platform, re, secrets, shutil, subprocess, tarfile, tempfile, time, urllib.error, urllib.request, urllib.parse, uuid
 from datetime import datetime, timezone
 
 from herokutl.tl.functions.channels import ToggleForumRequest, InviteToChannelRequest, GetParticipantRequest
@@ -43,7 +43,7 @@ from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotP
 from .. import loader, utils
 from .._internal import fw_protect
 
-__version__ = (2, 0, 0)
+__version__ = (2, 1, 0)
 
 # Where the queue relay is and how to reach it. Nothing is assumed: a freshly
 # loaded module is unconfigured until .xasknet (or the .cfg editor) stores
@@ -61,6 +61,159 @@ BACKEND_URL = _ENV_BACKEND_URL
 # (--outbound-http-proxy-listen=localhost:1056). Empty = connect directly.
 HTTP_PROXY = _ENV_HTTP_PROXY
 TAILNET_PROXY = "http://localhost:1056"
+
+
+# A userbot container usually has no init system and only one persistent
+# volume, /data. tailscaled is therefore started from client_ready on every
+# module load, its state and (when the image has no Tailscale) the official
+# static binaries live under /data, so a container rebuild keeps both the
+# install and the login.
+TAILSCALE_STATE_DIR = "/data/tailscale"
+TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"
+TAILSCALE_PKGS = "https://pkgs.tailscale.com/stable"
+TAILSCALE_START_TIMEOUT_S = 15
+_TAILSCALE_ARCH = {
+    "x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64",
+    "armv7l": "arm", "armv6l": "arm", "i386": "386", "i686": "386",
+}
+
+
+def _tailscale_binary(name):
+    found = shutil.which(name)
+    if found:
+        return found
+    local = os.path.join(TAILSCALE_STATE_DIR, "bin", name)
+    return local if os.access(local, os.X_OK) else None
+
+
+def _download(url, timeout=60):
+    # A fresh opener on purpose: RELAY_OPENER may point at the tailnet proxy
+    # that is being installed here.
+    with urllib.request.build_opener().open(url, timeout=timeout) as response:
+        return response.read()
+
+
+def _install_tailscale():
+    """Install the official static Tailscale build into TAILSCALE_STATE_DIR."""
+    volume = os.path.dirname(TAILSCALE_STATE_DIR)
+    if not os.path.isdir(volume):
+        raise RuntimeError(
+            f"в контейнере нет постоянного тома {volume}: Tailscale некуда поставить. "
+            "Подключи том или поставь Tailscale в образ."
+        )
+    arch = _TAILSCALE_ARCH.get(platform.machine().lower())
+    if not arch:
+        raise RuntimeError(f"нет готовой сборки Tailscale для архитектуры {platform.machine()}")
+    index = json.loads(_download(f"{TAILSCALE_PKGS}/?mode=json"))
+    name = (index.get("Tarballs") or {}).get(arch)
+    if not name:
+        raise RuntimeError(f"в индексе Tailscale нет сборки для {arch}")
+    archive = _download(f"{TAILSCALE_PKGS}/{name}", timeout=300)
+    expected = _download(f"{TAILSCALE_PKGS}/{name}.sha256").decode().split()[0].lower()
+    if hashlib.sha256(archive).hexdigest() != expected:
+        raise RuntimeError("контрольная сумма архива Tailscale не совпала, установка отменена")
+    bin_dir = os.path.join(TAILSCALE_STATE_DIR, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            base = os.path.basename(member.name)
+            if member.isfile() and base in ("tailscale", "tailscaled"):
+                target = os.path.join(bin_dir, base)
+                with open(target + ".new", "wb") as handle:
+                    handle.write(tar.extractfile(member).read())
+                os.chmod(target + ".new", 0o755)
+                os.replace(target + ".new", target)
+    if not (_tailscale_binary("tailscale") and _tailscale_binary("tailscaled")):
+        raise RuntimeError("в архиве Tailscale не нашлось tailscale/tailscaled")
+
+
+def _tailscale_status(cli):
+    """The daemon's status as a dict, or None when no daemon answers."""
+    try:
+        result = subprocess.run(
+            [cli, "--socket", TAILSCALE_SOCKET, "status", "--json"],
+            capture_output=True, timeout=10,
+        )
+        status = json.loads(result.stdout or b"{}")
+    except Exception:
+        return None
+    return status if isinstance(status, dict) and status.get("BackendState") else None
+
+
+def _tailscale_poll(cli, done, timeout_s=TAILSCALE_START_TIMEOUT_S):
+    deadline = time.monotonic() + timeout_s
+    status = _tailscale_status(cli)
+    while not done(status) and time.monotonic() < deadline:
+        time.sleep(0.5)
+        status = _tailscale_status(cli)
+    return status
+
+
+def _tailscale_detached(argv, log_name):
+    with open(os.path.join(TAILSCALE_STATE_DIR, log_name), "a") as log:
+        subprocess.Popen(
+            argv, stdout=log, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+
+
+def _ensure_tailnet(hostname):
+    """Install, start and log in Tailscale as far as it can go unattended.
+
+    Returns (state, detail): ("running", tailnet IP), ("login", login URL or
+    "" when an admin has to approve the device), ("starting", "") or
+    ("error", reason). Idempotent: a running node is left alone.
+    """
+    cli, daemon = _tailscale_binary("tailscale"), _tailscale_binary("tailscaled")
+    if not (cli and daemon):
+        try:
+            _install_tailscale()
+        except Exception as error:
+            return "error", f"не удалось установить Tailscale: {error}"
+        cli, daemon = _tailscale_binary("tailscale"), _tailscale_binary("tailscaled")
+    os.makedirs(TAILSCALE_STATE_DIR, exist_ok=True)
+    status = _tailscale_status(cli)
+    if status is None:
+        # No /dev/net/tun in a userbot container: userspace networking, with
+        # the HTTP proxy the relay requests go through (TAILNET_PROXY).
+        os.makedirs(os.path.dirname(TAILSCALE_SOCKET), exist_ok=True)
+        _tailscale_detached([
+            daemon,
+            "--tun=userspace-networking",
+            f"--state={TAILSCALE_STATE_DIR}/tailscaled.state",
+            f"--socket={TAILSCALE_SOCKET}",
+            "--socks5-server=localhost:1055",
+            "--outbound-http-proxy-listen=localhost:1056",
+        ], "tailscaled.log")
+        status = _tailscale_poll(
+            cli, lambda s: s is not None and s["BackendState"] not in ("NoState", "Starting"),
+        )
+        if status is None:
+            return "error", f"tailscaled не запустился, см. {TAILSCALE_STATE_DIR}/tailscaled.log"
+    state = status["BackendState"]
+    if state in ("NeedsLogin", "Stopped") and not status.get("AuthURL"):
+        # `up` waits until the node is running and exits by itself, so it
+        # stays detached: the login link it requests shows up in the status.
+        # --reset: this node is managed here, a flag left over from an
+        # earlier `up` must not make it refuse to start.
+        _tailscale_detached([
+            cli, "--socket", TAILSCALE_SOCKET, "up", "--reset",
+            f"--hostname={hostname}", "--accept-routes",
+        ], "tailscale-up.log")
+        status = _tailscale_poll(
+            cli, lambda s: s is not None and (s["BackendState"] == "Running" or s.get("AuthURL")),
+        ) or status
+        state = status["BackendState"]
+    if state == "Running":
+        ips = (status.get("Self") or {}).get("TailscaleIPs") or []
+        return "running", next((ip for ip in ips if "." in ip), ips[0] if ips else "")
+    if status.get("AuthURL"):
+        return "login", status["AuthURL"]
+    if state == "NeedsMachineAuth":
+        return "login", ""
+    if state in ("NoState", "Starting"):
+        return "starting", ""
+    return "error", f"Tailscale в состоянии {state}, см. {TAILSCALE_STATE_DIR}/tailscale-up.log"
 
 
 def _make_relay_opener(proxy):
@@ -536,16 +689,11 @@ class CodexAsk(loader.Module):
                     self._config_set(key, legacy[key])
         self._apply_config()
         await self._ensure_topics()
-        # Same-host deployments do not need tailscaled and may not have its
-        # binary installed. A live sibling deployment hit FileNotFoundError
-        # for `tailscaled` on 2026-09-01; that must not break module loading.
-        if HTTP_PROXY:
+        # Only a tailnet setup needs tailscaled; a same-host or custom-proxy
+        # one never installs or starts it. Nothing here may break loading.
+        if HTTP_PROXY == TAILNET_PROXY:
             try:
-                hostname = str(self.config["tailscale_hostname"] or "").strip()
-                if not hostname:
-                    owner_id = await self._get_owner_id()
-                    hostname = f"userbot-{owner_id}" if owner_id else "userbot"
-                await asyncio.to_thread(self._ensure_tailnet, hostname)
+                await self._arm_tailnet(notify=True)
             except Exception:
                 pass
 
@@ -685,59 +833,38 @@ class CodexAsk(loader.Module):
         if chat_id and isinstance(result, str) and result.startswith("✅"):
             self._agent_turn_sent[str(chat_id)] = True
 
-    def _ensure_tailnet(self, hostname):
-        """Auto-(re)start tailscaled (userspace-networking, no /dev/net/tun
-        in this container) on every module load. This container has no init
-        system besides docker-init -- `python3 -m heroku` (which reloads this
-        module) is the only thing guaranteed to run again after a container
-        restart, so the tailnet path BACKEND_URL relies on has to be re-armed from
-        here, not from a systemd unit that doesn't exist. Idempotent: a live
-        tailscaled is left alone.
-        """
-        # State lives under /data -- the only real bind-mounted volume in
-        # this container (confirmed via /proc/mounts: everything else,
-        # including /var/lib and /tmp, is overlay/tmpfs and does NOT survive
-        # a container recreation). Keeping the auth state here means a
-        # userbot reinstall doesn't force a brand new interactive
-        # tailscale-login approval -- only wiping /data itself would.
-        state_dir = "/data/tailscale"
-        sock = "/var/run/tailscale/tailscaled.sock"
-        if os.path.exists(sock):
+    async def _arm_tailnet(self, notify=False):
+        """Run _ensure_tailnet off the event loop. With notify, a new login
+        link is also sent to Saved Messages (once per link), because on a
+        module load nobody is looking at a command reply."""
+        hostname = str(self.config["tailscale_hostname"] or "").strip()
+        if not hostname:
+            owner_id = await self._get_owner_id()
+            hostname = f"userbot-{owner_id}" if owner_id else "userbot"
+        state, detail = await asyncio.to_thread(_ensure_tailnet, hostname)
+        if notify and state == "login" and detail and self.db.get("CodexAsk", "tailnet_login_sent", None) != detail:
             try:
-                subprocess.run(
-                    ["tailscale", "--socket", sock, "status"],
-                    capture_output=True, timeout=5, check=True,
-                )
-                return  # already up and authenticated
+                await self._client.send_message("me", self._tailnet_text(state, detail), parse_mode="html")
+                self.db.set("CodexAsk", "tailnet_login_sent", detail)
             except Exception:
-                pass  # stale socket from a dead daemon -- fall through and respawn
-        os.makedirs(state_dir, exist_ok=True)
-        os.makedirs("/var/run/tailscale", exist_ok=True)
-        subprocess.Popen(
-            [
-                "tailscaled",
-                "--tun=userspace-networking",
-                f"--state={state_dir}/tailscaled.state",
-                f"--socket={sock}",
-                "--socks5-server=localhost:1055",
-                "--outbound-http-proxy-listen=localhost:1056",
-            ],
-            stdout=open("/tmp/tailscaled.log", "a"),
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        time.sleep(2)
-        if os.path.exists(f"{state_dir}/tailscaled.state"):
-            # A node that logged in before reconnects by itself from its saved
-            # state; running `up` again with different flags would only fail.
-            return
-        # First start on this volume: ask to join the tailnet. The login URL
-        # this prints (into the log) has to be opened once by the owner.
-        subprocess.run(
-            ["tailscale", "--socket", sock, "up", f"--hostname={hostname}", "--accept-routes"],
-            capture_output=True, timeout=15,
-        )
+                pass
+        return state, detail
+
+    @staticmethod
+    def _tailnet_text(state, detail):
+        if state == "running":
+            return f"✅ Tailscale в сети: <code>{_h(detail or 'IP не получен')}</code>"
+        if state == "login" and detail:
+            return (
+                "🔐 <b>CodexAsk</b>: этот юзербот ещё не вошёл в tailnet.\n"
+                f"Открой ссылку и подтверди устройство тем аккаунтом Tailscale, в чьём tailnet бэкенд:\n{_h(detail)}\n"
+                "Потом — <code>.xasknet check</code>."
+            )
+        if state == "login":
+            return "🔐 Tailscale: устройство ждёт одобрения администратором в консоли Tailscale, потом — <code>.xasknet check</code>."
+        if state == "starting":
+            return "⏳ Tailscale ещё подключается — повтори <code>.xasknet check</code> через минуту."
+        return f"❌ {_h(detail)}"
 
     async def _ensure_topics(self):
         """Idempotent -- safe to call repeatedly (e.g. lazily from
@@ -4591,6 +4718,11 @@ class CodexAsk(loader.Module):
         if mode == "check" and len(args) == 1:
             if not await self._require_config(work_message):
                 return
+            if HTTP_PROXY == TAILNET_PROXY:
+                state, detail = await self._arm_tailnet()
+                if state != "running":
+                    await self._safe_edit(work_message, self._tailnet_text(state, detail), parse_mode="html")
+                    return
             ok, verdict = await asyncio.get_running_loop().run_in_executor(None, self._relay_whoami)
             await self._safe_edit(work_message, f"{'✅' if ok else '❌'} {verdict}", parse_mode="html")
             return
@@ -4634,10 +4766,16 @@ class CodexAsk(loader.Module):
         self._config_set("backend_url", backend_url)
         self._config_set("http_proxy", http_proxy)
         self._apply_config()
-        await self._safe_edit(
-            work_message, config_text("✅ Сетевая конфигурация применена:"),
+        applied = config_text("✅ Сетевая конфигурация применена:")
+        if HTTP_PROXY != TAILNET_PROXY:
+            await self._safe_edit(work_message, applied, parse_mode="html")
+            return
+        work_message = await self._safe_edit(
+            work_message, f"{applied}\n\n⏳ Готовлю Tailscale (при первом запуске — скачиваю)…",
             parse_mode="html",
         )
+        state, detail = await self._arm_tailnet()
+        await self._safe_edit(work_message, f"{applied}\n\n{self._tailnet_text(state, detail)}", parse_mode="html")
 
     @loader.command()
     async def xask(self, message):

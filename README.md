@@ -95,20 +95,14 @@ Triggers run unattended, so they are deliberately limited: by default a trigger 
 If your userbot runs elsewhere, the two servers talk over [Tailscale](https://tailscale.com):
 
 1. On **this** server, answer `2` to the installer's last question — it installs Tailscale, logs this server into your tailnet and lets the relay listen there.
-2. In the **userbot's container**, Tailscale must be installed (add it to its image, so it survives a rebuild):
-   ```dockerfile
-   RUN curl -fsSL https://tailscale.com/install.sh -o /tmp/ts.sh && sh /tmp/ts.sh && rm /tmp/ts.sh
-   ```
-   The container needs a persistent `/data` volume; the module starts Tailscale there on every load.
-3. Connect the module and log the container in once:
+2. In the userbot, connect the module:
    ```text
    .xasknet token <token>
    .xasknet tailnet mybot http://<this-server-tailnet-ip>:9092
    ```
-   ```bash
-   docker exec -it <userbot-container> tailscale --socket=/var/run/tailscale/tailscaled.sock up
-   ```
-   Open the printed link to approve the device, then run `.xasknet check`.
+   The module installs Tailscale into the container by itself (once, about 30 MB, checksum-verified), starts it and replies with a login link. Open it, approve the device with the same Tailscale account as this server, then run `.xasknet check`.
+
+The container needs a persistent `/data` volume — the Heroku Docker image has one; Tailscale's state and binaries live there, so restarts and rebuilds reconnect on their own. If the node ever needs a new login, the link arrives in your Saved Messages. A Tailscale already in the image is used as is.
 
 ## Troubleshooting
 
