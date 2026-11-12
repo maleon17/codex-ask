@@ -409,11 +409,11 @@ def test_generated_image_gets_registered_for_download_the_same_way_cmd_queue_exp
     real_file = tmp_path / "generated.png"
     real_file.write_bytes(b"not a real png, just needs to exist")
 
-    assert worker._register_artifact_for_download("andrey_codex", str(real_file))
+    assert worker._register_artifact_for_download("codex-instance", str(real_file))
 
     key = hashlib.sha256(str(real_file).encode("utf-8", "surrogateescape")).hexdigest()
-    record_path = tmp_path / "artifacts" / "andrey_codex" / f"{key}.json"
+    record_path = tmp_path / "artifacts" / "codex-instance" / f"{key}.json"
     assert record_path.is_file()
     assert json_module.loads(record_path.read_text()) == {"path": str(real_file)}
 
-    assert not worker._register_artifact_for_download("andrey_codex", str(tmp_path / "missing.png"))
+    assert not worker._register_artifact_for_download("codex-instance", str(tmp_path / "missing.png"))

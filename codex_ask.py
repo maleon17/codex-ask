@@ -1,4 +1,4 @@
-# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl (sha256 b05a959f9f78);
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl (sha256 de73c8d65b5b);
 # change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
 #
@@ -158,6 +158,15 @@ TRIGGER_LOCAL_SEND_TOOLS = frozenset({"send_message", "send_message_as_bot"})
 # it is an ordinary sender. See _requester_for().
 TEST_CHANNEL_BOT_ID = 0
 INTERNAL_TOOL_RESULT_PREFIX = "[INTERNAL_TOOL_RESULT]"
+# Tools whose empty chat argument means "the chat this request came from".
+# A call that did not come from a chat (the owner acting from a Telegram
+# bridge) has no such chat, so the argument must be given explicitly.
+CURRENT_CHAT_ARGUMENT = {
+    "invite_to_group": "group", "get_invite_link": "group", "send_file": "target",
+    "leave_chat": "target", "list_chat_members": "chat", "register_trigger": "chat",
+    "remove_trigger": "chat", "edit_trigger": "chat", "list_triggers": "chat",
+    "search_chat": "chat", "read_history": "chat", "forward_message": "to",
+}
 TOOL_PERMISSION_DENIAL = (
     f"{INTERNAL_TOOL_RESULT_PREFIX} Действие заблокировано: Telegram-действия "
     "доступны только владельцу юзербота или выделенному тестовому каналу в "
@@ -532,7 +541,11 @@ class CodexAsk(loader.Module):
         # for `tailscaled` on 2026-09-01; that must not break module loading.
         if HTTP_PROXY:
             try:
-                await asyncio.to_thread(self._ensure_tailnet)
+                hostname = str(self.config["tailscale_hostname"] or "").strip()
+                if not hostname:
+                    owner_id = await self._get_owner_id()
+                    hostname = f"userbot-{owner_id}" if owner_id else "userbot"
+                await asyncio.to_thread(self._ensure_tailnet, hostname)
             except Exception:
                 pass
 
@@ -672,7 +685,7 @@ class CodexAsk(loader.Module):
         if chat_id and isinstance(result, str) and result.startswith("✅"):
             self._agent_turn_sent[str(chat_id)] = True
 
-    def _ensure_tailnet(self):
+    def _ensure_tailnet(self, hostname):
         """Auto-(re)start tailscaled (userspace-networking, no /dev/net/tun
         in this container) on every module load. This container has no init
         system besides docker-init -- `python3 -m heroku` (which reloads this
@@ -715,12 +728,14 @@ class CodexAsk(loader.Module):
             start_new_session=True,
         )
         time.sleep(2)
-        # Auth state persists in tailscaled.state from the one-time
-        # interactive login -- this just nudges it to reconnect, no new
-        # login flow unless the node's key was expired/revoked tailnet-side.
+        if os.path.exists(f"{state_dir}/tailscaled.state"):
+            # A node that logged in before reconnects by itself from its saved
+            # state; running `up` again with different flags would only fail.
+            return
+        # First start on this volume: ask to join the tailnet. The login URL
+        # this prints (into the log) has to be opened once by the owner.
         subprocess.run(
-            ["tailscale", "--socket", sock, "up",
-             "--hostname=hikka-userbot", "--accept-routes"],
+            ["tailscale", "--socket", sock, "up", f"--hostname={hostname}", "--accept-routes"],
             capture_output=True, timeout=15,
         )
 
@@ -3975,6 +3990,19 @@ class CodexAsk(loader.Module):
                 owner_authorized=data.get("owner_authorized"),
             ):
                 result = TOOL_PERMISSION_DENIAL
+            elif not chat_id and tool == "delete_messages":
+                result = (
+                    f"{INTERNAL_TOOL_RESULT_PREFIX} Не выполнено: delete_messages удаляет сообщения "
+                    "в чате, из которого пришёл запрос, а этот вызов пришёл не из чата."
+                )
+            elif not chat_id and tool in CURRENT_CHAT_ARGUMENT and not str(
+                args.get(CURRENT_CHAT_ARGUMENT[tool]) or ""
+            ).strip():
+                result = (
+                    f"{INTERNAL_TOOL_RESULT_PREFIX} Не выполнено: этот вызов пришёл не из "
+                    "Telegram-чата, поэтому «текущего чата» нет. Укажи чат явно в параметре "
+                    f"«{CURRENT_CHAT_ARGUMENT[tool]}» (id, @username или точное название) и повтори."
+                )
             elif tool == "resolve_person":
                 result = await self._resolve_person(args.get("query", ""))
             elif tool == "create_group":
