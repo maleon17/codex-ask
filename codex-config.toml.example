@@ -6,5 +6,6 @@
 command = "__MCP_PYTHON__"
 args = ["__CORE_DIR__/telegram_actions_mcp.py"]
 startup_timeout_sec = 20.0
-tool_timeout_sec = 200.0
+# delegate_to_bridge can wait several minutes for the other agent's answer.
+tool_timeout_sec = 700.0
 default_tools_approval_mode = "auto"

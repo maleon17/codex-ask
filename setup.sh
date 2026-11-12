@@ -215,6 +215,13 @@ if [[ -n "$INSTANCE_ID" ]]; then
     [[ -n "$OWNER_TG_ID" ]] || die "owner Telegram ID is required to authorize instance '$INSTANCE_ID'"
 
     RELAY_TOKEN="$("$CORE_DIR/register_instance.sh" "$INSTANCE_ID" "$OWNER_TG_ID" "$WORKER_TOKEN_ENV")"
+    # Recorded so a Telegram bridge can tell which instance this product
+    # serves when one person owns several.
+    SERVED="$(core_registry get codex-ask instances 2>/dev/null || true)"
+    case ",$SERVED," in
+        *",$INSTANCE_ID,"*) ;;
+        *) core_registry register codex-ask "path=$ROOT" "instances=${SERVED:+$SERVED,}$INSTANCE_ID" ;;
+    esac
     echo "Registered owner $OWNER_TG_ID and a new token for instance '$INSTANCE_ID' in $RELAY_CONFIG_DIR"
     echo "(a running relay picks this up by itself; no restart needed)."
     if (( WORKER_ACTIVE )); then
