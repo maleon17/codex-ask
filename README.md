@@ -14,13 +14,10 @@ Part of **[Telegram AI](https://github.com/maleon17/telegram-ai)** — Claude Co
 
 CodexAsk is a module for a Telegram **userbot** (your own account, automated) plus a Codex backend on your server. In any chat you write `.xask what does this error mean?` — your message turns into a live progress view and then into the answer, as if you had typed it yourself. There is no separate bot to talk to: it lives in the conversations you already have.
 
-```mermaid
-flowchart LR
-    C["Any chat<br/>.xask …"] --> U["CodexAsk module<br/>(your userbot)"]
-    U <--> R["Queue relay"]
-    R <--> W["Codex App Server<br/>on your server"]
-    W -. "Telegram actions" .-> R -.-> U
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+  <img alt="In any chat .xask goes to your userbot's CodexAsk module, which talks to telegram-ai-core's queue relay on your server; the Codex worker runs the Codex App Server with a persistent thread per chat; Telegram actions go through the Telegram actions MCP back to your userbot, which performs them in your account." src="docs/architecture-light.svg" width="860">
+</picture>
 
 It runs on your ChatGPT/Codex subscription through the official Codex CLI, with a long-lived Codex App Server behind it. The backend never holds your Telegram account: when Codex wants to *do* something in Telegram, the request goes back to your userbot, which performs it and reports the real result.
 
