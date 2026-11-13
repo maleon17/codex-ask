@@ -145,9 +145,9 @@ def test_tool_context_is_per_turn_and_forwards_topic_and_placeholder(monkeypatch
 
     assert writes == [
         {"request_id": "first", "requester_id": "owner", "topic_id": 11, "message_id": 101,
-         "chat_id": "42"},
+         "chat_id": "42", "language": "ru"},
         {"request_id": "second", "requester_id": "owner", "topic_id": 22, "message_id": 202,
-         "chat_id": "42"},
+         "chat_id": "42", "language": "ru"},
     ]
 
 
@@ -213,7 +213,7 @@ def test_session_routing_keeps_observed_chat_for_tools_and_nomats(monkeypatch, t
     prompt = next(params["input"][0]["text"] for method, params, _ in session.client.calls if method == "turn/start")
     assert writes == [{
         "request_id": "trigger", "requester_id": "trigger:rule", "topic_id": None,
-        "message_id": None, "chat_id": "42",
+        "message_id": None, "chat_id": "42", "language": "ru",
     }]
     assert "КАТЕГОРИЧЕСКИ запрещён мат" in prompt
     worker.close()

@@ -144,7 +144,8 @@ Settings survive module updates. `codex_ask.py` and `jarvis_ask.py` are built in
 <summary><b>Settings, files and manual setup</b></summary>
 
 - **Voice transcription** uses Mistral's Voxtral API: put a key into `.cfg CodexAsk` → `mistral_api_key`.
-- **Persona**: `personas/<instance>.md` on the server (git-ignored), re-read automatically; the template is `personas/default.md.example`.
+- **Language**: `.cfg CodexAsk` → `language` (`auto`, `en`, `ru`, `uk`, `kk`, `de`). It switches the module's messages, `.help` and settings descriptions, and the persona: an unedited persona is replaced by the repository's translation (`personas/default.<lang>.md.example`), an edited one is translated by the backend's model, and switching back to its original language restores your text unchanged. `auto` follows the userbot's own language (`.setlang`), otherwise English.
+- **Persona**: `personas/<instance>.md` on the server (git-ignored), re-read automatically; the templates are `personas/default.md.example` (English) and `personas/default.<lang>.md.example`.
 - **Codex home**: `codex_home/` holds this worker's own `config.toml` (an existing one is kept on re-install; the fresh one is written next to it as `config.toml.new`) and a link to your Codex login.
 - **Worker settings** (environment): `CODEX_JARVIS_MODEL`, `CODEX_JARVIS_CLASSIFY_MODEL`, `CODEX_JARVIS_SANDBOX`, `CODEX_JARVIS_CWD`.
 - **Relay credentials, state directory, registry**: see [telegram-ai-core](https://github.com/maleon17/telegram-ai-core).

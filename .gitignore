@@ -8,7 +8,8 @@ workspace/
 codex-config.toml
 codex-jarvis.service
 
-# Live personas are local-only; only the neutral template ships in the repo.
+# Live personas are local-only; only the neutral templates ship in the repo.
 personas/*
 !personas/default.md.example
+!personas/default.*.md.example
 jarvis.env

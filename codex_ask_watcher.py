@@ -91,6 +91,142 @@ CLASSIFY_PROMPT = (
     "для перестраховки."
 )
 DEFAULT_INSTANCE = os.environ.get("CODEX_JARVIS_INSTANCE_ID", "default")
+
+# Interface language of a request: the userbot module sends its `language`
+# setting with every request. It picks the shipped persona template and the
+# language of everything this worker writes itself. A module too old to send
+# one was Russian-only, so that stays the default.
+LANGUAGES = ("en", "ru", "uk", "kk", "de")
+DEFAULT_LANGUAGE = "ru"
+_TEXTS = {
+    "file_created": {"en": "created", "ru": "создан", "uk": "створено", "kk": "жасалды", "de": "erstellt"},
+    "file_deleted": {"en": "deleted", "ru": "удалён", "uk": "видалено", "kk": "жойылды", "de": "gelöscht"},
+    "file_changed": {"en": "changed", "ru": "изменён", "uk": "змінено", "kk": "өзгертілді", "de": "geändert"},
+    "file_change": {"en": "✏️ File change", "ru": "✏️ Изменение файла", "uk": "✏️ Зміна файлу",
+                    "kk": "✏️ Файлды өзгерту", "de": "✏️ Dateiänderung"},
+    "tool": {"en": "Tool", "ru": "Инструмент", "uk": "Інструмент", "kk": "Құрал", "de": "Werkzeug"},
+    "agent": {"en": "agent", "ru": "агент", "uk": "агент", "kk": "агент", "de": "Agent"},
+    "agent_label": {"en": "🤖 Agent · {name}", "ru": "🤖 Агент · {name}", "uk": "🤖 Агент · {name}",
+                    "kk": "🤖 Агент · {name}", "de": "🤖 Agent · {name}"},
+    "image_view": {"en": "🖼 Viewing an image", "ru": "🖼 Просмотр изображения", "uk": "🖼 Перегляд зображення",
+                   "kk": "🖼 Суретті қарау", "de": "🖼 Bild ansehen"},
+    "image_generation": {"en": "🎨 Generating an image", "ru": "🎨 Генерация изображения",
+                         "uk": "🎨 Генерація зображення", "kk": "🎨 Сурет жасау", "de": "🎨 Bild erzeugen"},
+    "compaction": {"en": "🗜 Context compaction", "ru": "🗜 Сжатие контекста", "uk": "🗜 Стиснення контексту",
+                   "kk": "🗜 Контексті сығу", "de": "🗜 Kontext komprimieren"},
+    "compacted": {"en": "the session context was compacted", "ru": "контекст сессии сжат",
+                  "uk": "контекст сесії стиснуто", "kk": "сессия контексі сығылды",
+                  "de": "der Sitzungskontext wurde komprimiert"},
+    "plan": {"en": "📋 Plan", "ru": "📋 План", "uk": "📋 План", "kk": "📋 Жоспар", "de": "📋 Plan"},
+    "seconds": {"en": "{value} s", "ru": "{value} с", "uk": "{value} с", "kk": "{value} с", "de": "{value} s"},
+    "waiting": {"en": "⏳ Waiting", "ru": "⏳ Ожидание", "uk": "⏳ Очікування", "kk": "⏳ Күту", "de": "⏳ Warten"},
+    "review": {"en": "🔍 Review", "ru": "🔍 Проверка", "uk": "🔍 Перевірка", "kk": "🔍 Тексеру", "de": "🔍 Prüfung"},
+    "review_on": {"en": "review mode on", "ru": "режим проверки включён", "uk": "режим перевірки увімкнено",
+                  "kk": "тексеру режимі қосылды", "de": "Prüfmodus an"},
+    "review_off": {"en": "review mode finished", "ru": "режим проверки завершён", "uk": "режим перевірки завершено",
+                   "kk": "тексеру режимі аяқталды", "de": "Prüfmodus beendet"},
+    "error": {"en": "❌ Error", "ru": "❌ Ошибка", "uk": "❌ Помилка", "kk": "❌ Қате", "de": "❌ Fehler"},
+    "result": {"en": "Result", "ru": "Результат", "uk": "Результат", "kk": "Нәтиже", "de": "Ergebnis"},
+    "result_received": {"en": "result received", "ru": "результат получен", "uk": "результат отримано",
+                        "kk": "нәтиже алынды", "de": "Ergebnis erhalten"},
+    "codex_error": {"en": "Codex error", "ru": "ошибка Codex", "uk": "помилка Codex", "kk": "Codex қатесі",
+                    "de": "Codex-Fehler"},
+    "usage_limit": {"en": "The Codex account limit is used up. Check /usage and wait for the reset time.",
+                    "ru": "Лимит аккаунта Codex исчерпан. Проверь /usage и дождись времени сброса.",
+                    "uk": "Ліміт акаунта Codex вичерпано. Перевір /usage і дочекайся часу скидання.",
+                    "kk": "Codex аккаунтының лимиті таусылды. /usage тексеріп, қалпына келу уақытын күт.",
+                    "de": "Das Limit des Codex-Kontos ist aufgebraucht. Prüfe /usage und warte auf den Reset."},
+    "session_budget": {"en": "This session's budget is used up. Use .xnew for a new thread.",
+                       "ru": "Бюджет этой сессии исчерпан. Используй .xnew для нового треда.",
+                       "uk": "Бюджет цієї сесії вичерпано. Використай .xnew для нового треду.",
+                       "kk": "Бұл сессияның бюджеті таусылды. Жаңа тред үшін .xnew қолдан.",
+                       "de": "Das Budget dieser Sitzung ist aufgebraucht. Nutze .xnew für einen neuen Thread."},
+    "context_full": {"en": "The session context is full. Use .xnew and start a new thread.",
+                     "ru": "Контекст сессии исчерпан. Используй .xnew и начни новый тред.",
+                     "uk": "Контекст сесії вичерпано. Використай .xnew і почни новий тред.",
+                     "kk": "Сессия контексі толды. .xnew қолданып, жаңа тред баста.",
+                     "de": "Der Sitzungskontext ist voll. Nutze .xnew und starte einen neuen Thread."},
+    "context_lost": {"en": "The previous Codex context was not found; a new context was started.",
+                     "ru": "Прежний контекст Codex не найден; начат новый контекст.",
+                     "uk": "Попередній контекст Codex не знайдено; почато новий контекст.",
+                     "kk": "Codex-тің бұрынғы контексі табылмады; жаңа контекст басталды.",
+                     "de": "Der bisherige Codex-Kontext wurde nicht gefunden; ein neuer Kontext wurde begonnen."},
+    "empty_question": {"en": "Empty question.", "ru": "Пустой вопрос.", "uk": "Порожнє запитання.",
+                       "kk": "Бос сұрақ.", "de": "Leere Frage."},
+    "chat_context": {"en": "Context of the current chat:", "ru": "Контекст текущего чата:",
+                     "uk": "Контекст поточного чату:", "kk": "Ағымдағы чаттың контексі:",
+                     "de": "Kontext des aktuellen Chats:"},
+    "user_request": {"en": "User's request:", "ru": "Запрос пользователя:", "uk": "Запит користувача:",
+                     "kk": "Пайдаланушының сұрауы:", "de": "Anfrage des Benutzers:"},
+    "timeout_stopped": {"en": "Codex did not finish the request in time and was stopped.",
+                        "ru": "Codex не завершил запрос за отведённое время и был остановлен.",
+                        "uk": "Codex не завершив запит вчасно і був зупинений.",
+                        "kk": "Codex сұрауды белгіленген уақытта аяқтамады және тоқтатылды.",
+                        "de": "Codex hat die Anfrage nicht rechtzeitig beendet und wurde gestoppt."},
+    "timeout_restarted": {"en": "Codex did not finish the request in time; the app-server was restarted.",
+                          "ru": "Codex не завершил запрос за отведённое время; app-server перезапущен.",
+                          "uk": "Codex не завершив запит вчасно; app-server перезапущено.",
+                          "kk": "Codex сұрауды белгіленген уақытта аяқтамады; app-server қайта іске қосылды.",
+                          "de": "Codex hat die Anfrage nicht rechtzeitig beendet; der App-Server wurde neu gestartet."},
+    "no_text": {"en": "(Codex returned no answer text)", "ru": "(Codex не вернул текста ответа)",
+                "uk": "(Codex не повернув тексту відповіді)", "kk": "(Codex жауап мәтінін қайтармады)",
+                "de": "(Codex hat keinen Antworttext geliefert)"},
+    "codex_failed": {"en": "⚠️ Codex error: {error}", "ru": "⚠️ Ошибка Codex: {error}",
+                     "uk": "⚠️ Помилка Codex: {error}", "kk": "⚠️ Codex қатесі: {error}",
+                     "de": "⚠️ Codex-Fehler: {error}"},
+    "server_closed": {"en": "app-server closed", "ru": "app-server закрыт", "uk": "app-server закрито",
+                      "kk": "app-server жабылды", "de": "App-Server geschlossen"},
+    "session_reset": {"en": "the session was reset", "ru": "сессия сброшена", "uk": "сесію скинуто",
+                      "kk": "сессия қалпына келтірілді", "de": "die Sitzung wurde zurückgesetzt"},
+    "restarted": {"en": "⚠️ The request was interrupted by a worker restart; the action was not repeated.",
+                  "ru": "⚠️ Запрос прерван перезапуском worker; действие не повторялось.",
+                  "uk": "⚠️ Запит перервано перезапуском worker; дію не повторено.",
+                  "kk": "⚠️ Сұрау worker қайта іске қосылғандықтан үзілді; әрекет қайталанбады.",
+                  "de": "⚠️ Die Anfrage wurde durch einen Neustart des Workers unterbrochen; die Aktion wurde nicht wiederholt."},
+    "queue_error": {"en": "⚠️ Queue error: {error}", "ru": "⚠️ Ошибка очереди: {error}",
+                    "uk": "⚠️ Помилка черги: {error}", "kk": "⚠️ Кезек қатесі: {error}",
+                    "de": "⚠️ Warteschlangenfehler: {error}"},
+    "fallback_persona": {
+        "en": "You are Jarvis, a cheeky AI agent with a character of your own. Reply in the language "
+              "of the message you are answering, in simple HTML. Never call yourself a language model "
+              "and never mention the companies or models you run on.",
+        "ru": "Ты — Jarvis, дерзкий ИИ-агент с собственным характером. Отвечай на языке сообщения, "
+              "на которое отвечаешь, простым HTML. Никогда не называй себя языковой моделью и не "
+              "упоминай компании или модели, на которых работаешь.",
+        "uk": "Ти — Jarvis, зухвалий ШІ-агент із власним характером. Відповідай мовою повідомлення, "
+              "на яке відповідаєш, простим HTML. Ніколи не називай себе мовною моделлю і не згадуй "
+              "компанії чи моделі, на яких працюєш.",
+        "kk": "Сен — Jarvis, өз мінезі бар батыл ЖИ-агентсің. Жауап беріп отырған хабарламаның "
+              "тілінде, қарапайым HTML-мен жауап бер. Өзіңді ешқашан тілдік модель деп атама және "
+              "қандай компанияның не модельдің негізінде жұмыс істейтініңді айтпа.",
+        "de": "Du bist Jarvis, ein frecher KI-Agent mit eigenem Charakter. Antworte in der Sprache der "
+              "Nachricht, auf die du antwortest, in einfachem HTML. Bezeichne dich nie als Sprachmodell "
+              "und nenne nie die Firmen oder Modelle, auf denen du läufst.",
+    },
+    "no_mats": {
+        "en": "\n\nIMPORTANT: profanity and obscene language are STRICTLY forbidden in this chat. "
+              "Answer politely and courteously.",
+        "ru": "\n\nВНИМАНИЕ: в этом чате КАТЕГОРИЧЕСКИ запрещён мат и нецензурная лексика. "
+              "Отвечай вежливо и культурно.",
+        "uk": "\n\nУВАГА: у цьому чаті КАТЕГОРИЧНО заборонені лайка та нецензурна лексика. "
+              "Відповідай ввічливо й культурно.",
+        "kk": "\n\nНАЗАР АУДАР: бұл чатта балағат пен әдепсіз сөздерге ҚАТАҢ тыйым салынған. "
+              "Сыпайы және мәдениетті жауап бер.",
+        "de": "\n\nACHTUNG: In diesem Chat sind Schimpfwörter und obszöne Sprache STRENG verboten. "
+              "Antworte höflich und kultiviert.",
+    },
+}
+
+
+def _language(value):
+    return value if value in LANGUAGES else DEFAULT_LANGUAGE
+
+
+def _text(key, language=None, **values):
+    text = _TEXTS[key].get(_language(language)) or _TEXTS[key]["en"]
+    for name, value in values.items():
+        text = text.replace("{" + name + "}", str(value))
+    return text
 POLL_INTERVAL = float(os.environ.get("CODEX_JARVIS_POLL_INTERVAL", "0.35"))
 TURN_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_TIMEOUT", "1800"))
 TURN_INTERRUPT_TIMEOUT = float(os.environ.get("CODEX_JARVIS_TURN_INTERRUPT_TIMEOUT", "15"))
@@ -126,12 +262,8 @@ PERSONA_DIR = os.environ.get(
 _PERSONA_TEMPLATE = os.path.join(PERSONA_DIR, "default.md.example")
 _PERSONA_OWNER_NAME = os.environ.get("JARVIS_OWNER_NAME", "владелец")
 _PERSONA_OWNER_TG_ID = os.environ.get("JARVIS_OWNER_TG_ID", "")
-_PERSONA_FALLBACK = (
-    "Ты — Jarvis, дерзкий ИИ-агент с собственным характером. "
-    "Отвечай на русском, простым HTML. Никогда не называй себя "
-    "языковой моделью и не упоминай компании или модели, на которых работаешь."
-)
-_persona_cache: dict = {}
+_PERSONA_FALLBACK = _TEXTS["fallback_persona"][DEFAULT_LANGUAGE]
+_persona_cache: dict = {}  # (instance_id, language) -> (path, mtime, text)
 _persona_lock = threading.Lock()
 
 
@@ -157,18 +289,30 @@ def _read_persona_file(path: str) -> str:
         return fh.read(_PERSONA_READ_CAP + 1)
 
 
-def load_persona(instance_id: "str | None" = None) -> str:
+def _persona_template(language: str) -> str:
+    """The shipped template for a language: default.<lang>.md.example, else
+    default.md.example (English)."""
+    if language != "en":
+        localized = os.path.join(PERSONA_DIR, f"default.{language}.md.example")
+        if os.path.exists(localized):
+            return localized
+    return _PERSONA_TEMPLATE
+
+
+def load_persona(instance_id: "str | None" = None, language: "str | None" = None) -> str:
     instance_id = instance_id or DEFAULT_INSTANCE
+    language = _language(language)
+    cache_key = (instance_id, language)
     for path in (persona_file(instance_id),
                  os.path.join(PERSONA_DIR, "default.md"),
-                 _PERSONA_TEMPLATE):
+                 _persona_template(language)):
         try:
             st = os.stat(path)
             stamp = (st.st_mtime_ns, st.st_size)
         except OSError:
             continue
         with _persona_lock:
-            cached = _persona_cache.get(instance_id)
+            cached = _persona_cache.get(cache_key)
             if cached and cached[0] == path and cached[1] == stamp:
                 return cached[2]
         try:
@@ -183,18 +327,15 @@ def load_persona(instance_id: "str | None" = None) -> str:
         if not text:
             continue  # empty / whitespace-only -> fall through to the next source
         with _persona_lock:
-            _persona_cache[instance_id] = (path, stamp, text)
+            _persona_cache[cache_key] = (path, stamp, text)
         return text
-    return _PERSONA_FALLBACK
+    return _text("fallback_persona", language)
 
 
 # Appended to the system prompt for chats listed in $JARVIS_NOMATS_CHAT_IDS
 # (comma-separated Telegram chat ids, set by setup.sh / jarvis.env) so the
 # persona's default profanity is suppressed there. Empty by default.
-NO_MATS_RULE = (
-    "\n\nВНИМАНИЕ: в этом чате КАТЕГОРИЧЕСКИ запрещён мат и нецензурная "
-    "лексика. Отвечай вежливо и культурно."
-)
+NO_MATS_RULE = _TEXTS["no_mats"][DEFAULT_LANGUAGE]
 NOMATS_CHAT_IDS = {
     c.strip()
     for c in os.environ.get("JARVIS_NOMATS_CHAT_IDS", "").split(",")
@@ -361,7 +502,7 @@ def _item_text(value: object) -> str:
     return str(value)
 
 
-def _item_label(item: dict) -> tuple[str, str]:
+def _item_label(item: dict, language: "str | None" = None) -> tuple[str, str]:
     """Return a Claude-style (label, input) pair for one app-server item.
 
     The old renderer used generic fallbacks ("Выполняю", "выполняется" and
@@ -382,11 +523,11 @@ def _item_label(item: dict) -> tuple[str, str]:
                 change_kind = change.get("kind")
                 if isinstance(change_kind, dict):
                     change_kind = change_kind.get("type")
-                suffix = {"add": "создан", "delete": "удалён", "update": "изменён"}.get(
-                    str(change_kind or ""), "изменён"
-                )
+                suffix = _text({"add": "file_created", "delete": "file_deleted"}.get(
+                    str(change_kind or ""), "file_changed"
+                ), language)
                 paths.append(f"{change['path']} — {suffix}")
-        return "✏️ Изменение файла", _short("\n".join(paths) or item.get("path") or "")
+        return _text("file_change", language), _short("\n".join(paths) or item.get("path") or "")
     if kind == "web_search":
         action = item.get("action") or {}
         if isinstance(action, dict):
@@ -399,29 +540,29 @@ def _item_label(item: dict) -> tuple[str, str]:
         name = ".".join(filter(None, (item.get("server"), item.get("tool")))) or "Telegram tool"
         return f"🔧 {name}", _short(item.get("arguments") or "")
     if kind == "dynamic_tool_call":
-        name = ".".join(filter(None, (item.get("namespace"), item.get("tool")))) or "Инструмент"
+        name = ".".join(filter(None, (item.get("namespace"), item.get("tool")))) or _text("tool", language)
         return f"🔧 {name}", _short(item.get("arguments") or "")
     if kind in ("collab_agent_tool_call", "sub_agent_activity"):
-        name = item.get("tool") or item.get("kind") or "агент"
+        name = item.get("tool") or item.get("kind") or _text("agent", language)
         content = item.get("prompt") or item.get("agentsStates") or item.get("status") or ""
-        return f"🤖 Агент · {name}", _short(content)
+        return _text("agent_label", language, name=name), _short(content)
     if kind == "image_view":
-        return "🖼 Просмотр изображения", _short(item.get("path") or "")
+        return _text("image_view", language), _short(item.get("path") or "")
     if kind == "image_generation":
-        return "🎨 Генерация изображения", _short(item.get("failure") or "")
+        return _text("image_generation", language), _short(item.get("failure") or "")
     if kind == "context_compaction":
-        return "🗜 Сжатие контекста", "контекст сессии сжат"
+        return _text("compaction", language), _text("compacted", language)
     if kind == "plan":
-        return "📋 План", _short(item.get("text") or "")
+        return _text("plan", language), _short(item.get("text") or "")
     if kind == "sleep":
         duration = item.get("durationMs")
         try:
-            duration = f"{float(duration) / 1000:g} с"
+            duration = _text("seconds", language, value=f"{float(duration) / 1000:g}")
         except (TypeError, ValueError):
             duration = ""
-        return "⏳ Ожидание", duration
+        return _text("waiting", language), duration
     if kind in ("entered_review_mode", "exited_review_mode"):
-        return "🔍 Проверка", "режим проверки включён" if kind.startswith("entered") else "режим проверки завершён"
+        return _text("review", language), _text("review_on" if kind.startswith("entered") else "review_off", language)
     if kind in ("agent_message", "reasoning"):
         return "✍️", _item_text(item.get("text") or item.get("summary") or item.get("content"))
 
@@ -430,10 +571,10 @@ def _item_label(item: dict) -> tuple[str, str]:
     value = item.get("name") or item.get("tool") or item.get("query") or item.get("arguments")
     if value in (None, ""):
         value = str(kind).replace("_", " ")
-    return "🔧 Инструмент", _short(value)
+    return "🔧 " + _text("tool", language), _short(value)
 
 
-def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
+def _item_result_blocks(item: dict, language: "str | None" = None) -> list[tuple[str, str]]:
     """Render completed tool output like Claude's separate result blocks."""
     kind = item.get("type", "unknown")
     blocks: list[tuple[str, str]] = []
@@ -452,26 +593,27 @@ def _item_result_blocks(item: dict) -> list[tuple[str, str]]:
     elif kind == "mcp_tool_call":
         if item.get("error"):
             error = item.get("error")
-            blocks.append(("❌ Ошибка", _short(error, 1200)))
+            blocks.append((_text("error", language), _short(error, 1200)))
         elif item.get("result") is not None:
             result = item.get("result")
             if isinstance(result, dict):
                 content = result.get("content") or result.get("contentItems") or []
-                result = _item_text(content) or result.get("structuredContent") or "результат получен"
+                result = _item_text(content) or result.get("structuredContent") or _text("result_received", language)
             if _is_internal_tool_result(result):
                 # The result remains in the app-server conversation for Codex;
                 # suppress only the duplicate internal diagnostic in Telegram
                 # progress so it cannot cover the final answer.
                 return blocks
-            blocks.append(("✅ Результат", _short(result, 1600)))
+            blocks.append(("✅ " + _text("result", language), _short(result, 1600)))
     elif kind == "dynamic_tool_call" and item.get("contentItems") is not None:
-        blocks.append(("📤 Результат", _short(_item_text(item.get("contentItems")), 1600)))
+        blocks.append(("📤 " + _text("result", language), _short(_item_text(item.get("contentItems")), 1600)))
     return blocks
 
 
 class TurnState:
-    def __init__(self, request_id: str, generation: int = 0):
+    def __init__(self, request_id: str, generation: int = 0, language: "str | None" = None):
         self.request_id = request_id
+        self.language = _language(language)
         self.generation = generation
         self.thread_id: str | None = None
         self.turn_id: str | None = None
@@ -512,11 +654,11 @@ class TurnState:
                 lines.append(f"✍️ {html.escape(thought[-3500:], quote=False)}")
             item = self.current_item
             if item and item.get("type") not in ("agent_message", "reasoning"):
-                label, content = _item_label(item)
+                label, content = _item_label(item, self.language)
                 lines.append(f"{html.escape(label, quote=False)}:")
                 if content:
                     lines.append(f"<pre>{html.escape(content, quote=False)}</pre>")
-                for result_label, result_content in _item_result_blocks(item):
+                for result_label, result_content in _item_result_blocks(item, self.language):
                     lines.append(f"{html.escape(result_label, quote=False)}:")
                     lines.append(f"<pre>{html.escape(result_content, quote=False)}</pre>")
             return "\n".join(lines)
@@ -625,17 +767,17 @@ class TurnState:
                 if isinstance(error, dict):
                     info = error.get("codexErrorInfo")
                     message = error.get("message") or str(error)
-                    self.error = _friendly_error(info, message)
+                    self.error = _friendly_error(info, message, self.language)
                 else:
-                    self.error = _friendly_error(None, str(error or "ошибка Codex"))
+                    self.error = _friendly_error(None, str(error or _text("codex_error", self.language)), self.language)
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
                 if isinstance(turn, dict) and turn.get("error"):
                     error = turn["error"]
                     if isinstance(error, dict):
-                        self.error = _friendly_error(error.get("codexErrorInfo"), error.get("message", str(error)))
+                        self.error = _friendly_error(error.get("codexErrorInfo"), error.get("message", str(error)), self.language)
                     else:
-                        self.error = _friendly_error(None, str(error))
+                        self.error = _friendly_error(None, str(error), self.language)
                 self.done.set()
 
     def answer(self) -> str:
@@ -645,15 +787,15 @@ class TurnState:
             return self.stream_text
 
 
-def _friendly_error(info: object, message: object) -> str:
-    text = str(message or "ошибка Codex")
+def _friendly_error(info: object, message: object, language: "str | None" = None) -> str:
+    text = str(message or _text("codex_error", language))
     lowered = f"{info or ''} {text}".lower()
     if "usagelimitexceeded" in lowered:
-        return "Лимит аккаунта Codex исчерпан. Проверь /usage и дождись времени сброса."
+        return _text("usage_limit", language)
     if "sessionbudgetexceeded" in lowered:
-        return "Бюджет этой сессии исчерпан. Используй .xnew для нового треда."
+        return _text("session_budget", language)
     if "contextwindowexceeded" in lowered or "context window" in lowered:
-        return "Контекст сессии исчерпан. Используй .xnew и начни новый тред."
+        return _text("context_full", language)
     return _short(text, 1800)
 
 
@@ -764,7 +906,7 @@ class ChatSession:
                 "done": False, "request_id": active.request_id, "progress": progress,
             })
 
-    def _thread_params(self, thread_id: str | None = None) -> dict:
+    def _thread_params(self, thread_id: str | None = None, ephemeral: bool = False) -> dict:
         params = {
             "cwd": CODEX_CWD,
             "sandbox": CODEX_SANDBOX,
@@ -772,6 +914,9 @@ class ChatSession:
         }
         if thread_id:
             params["threadId"] = thread_id
+        if ephemeral:
+            # Kept in memory only: no rollout file in the sessions store.
+            params["ephemeral"] = True
         return params
 
     @staticmethod
@@ -786,7 +931,8 @@ class ChatSession:
         with self.lock:
             return generation == self.generation and not self.resetting
 
-    def _ensure_thread(self, persistent: bool, client=None, generation: int | None = None) -> str:
+    def _ensure_thread(self, persistent: bool, client=None, generation: int | None = None,
+                       ephemeral: bool = False, language: "str | None" = None) -> str:
         client = client or self.client
         generation = self.generation if generation is None else generation
         client.start_if_needed()
@@ -802,12 +948,12 @@ class ChatSession:
                 if not self._missing_thread_error(exc):
                     raise
                 log(f"{self.instance_id}:{self.chat_id} thread missing; starting a new context")
-                self.new_context_notice = "Прежний контекст Codex не найден; начат новый контекст."
+                self.new_context_notice = _text("context_lost", language)
                 self.thread_id = None
                 self.index.remove(self.instance_id, self.chat_id)
         if not self._is_current_generation(generation):
             raise AppServerError("session was reset")
-        result = client.request("thread/start", self._thread_params(), timeout=60) or {}
+        result = client.request("thread/start", self._thread_params(ephemeral=ephemeral), timeout=60) or {}
         thread = (result.get("thread") or {}).get("id")
         if not thread:
             raise AppServerError("thread/start returned no thread id")
@@ -830,10 +976,11 @@ class ChatSession:
     def _handle(self, request: dict) -> None:
         req_id = str(request.get("request_id") or uuid.uuid4())
         mode = str(request.get("mode") or "chat")
+        language = _language(request.get("language"))
         question = str(request.get("question") or "").strip()
         if not question:
             _atomic_json(RESULT_DIR / f"{req_id}.json", {
-                "done": True, "request_id": req_id, "answer": "Пустой вопрос.", "thoughts": [],
+                "done": True, "request_id": req_id, "answer": _text("empty_question", language), "thoughts": [],
             })
             return
         if _cancel_marker(req_id).exists():
@@ -845,7 +992,7 @@ class ChatSession:
             if self.resetting:
                 raise AppServerError("session was reset")
             generation = self.generation
-        state = TurnState(req_id, generation)
+        state = TurnState(req_id, generation, language)
         with self.lock:
             self.active = state
         if mode == "chat":
@@ -856,6 +1003,7 @@ class ChatSession:
                     "topic_id": request.get("topic_id"),
                     "message_id": request.get("message_id"),
                     "chat_id": str(request.get("chat_id") or self.chat_id),
+                    "language": language,
                 })
             except Exception as exc:
                 log(f"{self.instance_id}:{self.chat_id} tool context unavailable: {exc}")
@@ -863,21 +1011,32 @@ class ChatSession:
                     self.tool_context_path.unlink()
                 except FileNotFoundError:
                     pass
-        client = self.client if mode != "classify" else self._new_client(restricted=True)
+        # Utility turns with no tools: the trigger classifier and the relay's
+        # persona translation (cmd_queue.py, /xpersona_language), which also
+        # leaves no session behind.
+        restricted = mode in ("classify", "persona_translate")
+        client = self.client if not restricted else self._new_client(restricted=True)
         try:
             persistent = mode == "chat"
-            thread_id = self._ensure_thread(persistent, client, generation)
+            thread_id = self._ensure_thread(
+                persistent, client, generation, ephemeral=mode == "persona_translate", language=language,
+            )
             state.thread_id = thread_id
             if mode == "classify":
                 prompt = f"{CLASSIFY_PROMPT}\n\n{question}"
                 model = CODEX_CLASSIFY_MODEL
+            elif mode == "persona_translate":
+                prompt = question  # the relay's instructions and the persona
+                model = CODEX_MODEL
             else:
-                persona = load_persona(self.instance_id)
+                persona = load_persona(self.instance_id, language)
                 if str(request.get("chat_id") or self.chat_id) in NOMATS_CHAT_IDS:
-                    persona += NO_MATS_RULE
+                    persona += _text("no_mats", language)
                 chat_context = str(request.get("chat_context") or "").strip()
-                context_prefix = f"\n\nКонтекст текущего чата:\n{chat_context}" if chat_context else ""
-                prompt = f"{persona}{context_prefix}\n\nЗапрос пользователя:\n{question}"
+                context_prefix = (
+                    f"\n\n{_text('chat_context', language)}\n{chat_context}" if chat_context else ""
+                )
+                prompt = f"{persona}{context_prefix}\n\n{_text('user_request', language)}\n{question}"
                 model = CODEX_MODEL
             params = {
                 "threadId": thread_id,
@@ -887,7 +1046,7 @@ class ChatSession:
                 "model": model,
                 "effort": CODEX_EFFORT,
                 "sandboxPolicy": (
-                    {"type": "readOnly", "networkAccess": False} if mode == "classify" else {
+                    {"type": "readOnly", "networkAccess": False} if restricted else {
                         "type": "dangerFullAccess" if CODEX_SANDBOX == "danger-full-access" else (
                             "readOnly" if CODEX_SANDBOX == "read-only" else "workspaceWrite"
                         ),
@@ -927,10 +1086,10 @@ class ChatSession:
                         "threadId": thread_id,
                         **({"turnId": state.turn_id} if state.turn_id else {}),
                     }, timeout=TURN_INTERRUPT_TIMEOUT)
-                    state.error = "Codex не завершил запрос за отведённое время и был остановлен."
+                    state.error = _text("timeout_stopped", language)
                 except Exception as exc:
                     log(f"{self.instance_id}:{self.chat_id} interrupt failed: {exc}")
-                    state.error = "Codex не завершил запрос за отведённое время; app-server перезапущен."
+                    state.error = _text("timeout_restarted", language)
                     client.close()
             answer = state.answer()
             if state.error:
@@ -939,7 +1098,7 @@ class ChatSession:
                 answer = f"{self.new_context_notice}\n\n{answer}"
                 self.new_context_notice = ""
             if not answer:
-                answer = "(Codex не вернул текста ответа)"
+                answer = _text("no_text", language)
             for image_path in state.generated_image_paths:
                 if not _register_artifact_for_download(self.instance_id, image_path):
                     log(f"{self.instance_id}:{self.chat_id} could not register generated image {image_path} for download")
@@ -961,14 +1120,14 @@ class ChatSession:
                 _atomic_json(RESULT_DIR / f"{req_id}.json", {
                     "done": True,
                     "request_id": req_id,
-                    "answer": f"⚠️ Ошибка Codex: {_short(str(exc), 1800)}",
+                    "answer": _text("codex_failed", language, error=_short(str(exc), 1800)),
                     "thoughts": [],
                 })
         finally:
             with self.lock:
                 if self.active is state:
                     self.active = None
-            if mode == "classify":
+            if restricted:
                 client.close()
             _cancel_marker(req_id).unlink(missing_ok=True)
             try:
@@ -993,7 +1152,7 @@ class ChatSession:
         with self.lock:
             state = self.active
             if state is not None:
-                state.error = state.error or "app-server закрыт"
+                state.error = state.error or _text("server_closed", state.language)
                 state.done.set()
         self.client.close()
 
@@ -1003,13 +1162,22 @@ class ChatSession:
             self.resetting = True
             state = self.active
             if state is not None:
-                state.error = "сессия сброшена"
+                state.error = _text("session_reset", state.language)
                 state.done.set()
         self.client.close()
 
     def finish_reset(self) -> None:
         with self.lock:
             self.resetting = False
+
+
+def _queued_language(path) -> "str | None":
+    """The language a queued request asked for, when it can still be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle).get("language")
+    except Exception:
+        return None
 
 
 class Worker:
@@ -1054,8 +1222,8 @@ class Worker:
         for path in sorted(QUEUE_DIR.glob("*.json.processing")):
             req_id = path.name.split(".json.processing", 1)[0]
             _atomic_json(RESULT_DIR / f"{req_id}.json", {
-                "done": True, "request_id": req_id,
-                "answer": "⚠️ Запрос прерван перезапуском worker; действие не повторялось.", "thoughts": [],
+                "done": True, "request_id": req_id, "thoughts": [],
+                "answer": _text("restarted", _queued_language(path)),
             })
             try:
                 path.unlink()
@@ -1146,7 +1314,7 @@ class Worker:
         except Exception as exc:
             req_id = processing.stem.split(".", 1)[0]
             _atomic_json(RESULT_DIR / f"{req_id}.json", {
-                "done": True, "request_id": req_id, "answer": f"⚠️ Ошибка очереди: {exc}", "thoughts": [],
+                "done": True, "request_id": req_id, "answer": _text("queue_error", _queued_language(processing), error=exc), "thoughts": [],
             })
         finally:
             try:
