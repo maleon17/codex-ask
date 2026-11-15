@@ -1,4 +1,4 @@
-# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 bf5e1062fa8f);
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 bcd205d8c267);
 # change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
 #
@@ -43,7 +43,7 @@ from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotP
 from .. import loader, utils
 from .._internal import fw_protect
 
-__version__ = (2, 2, 0)
+__version__ = (2, 2, 1)
 
 # Interface language. Every user-visible string (and the text this module
 # hands to the model) lives in telegram-ai-core module/locales/<lang>.json;
@@ -144,6 +144,7 @@ _LOCALES = {
         "group_word": "Gruppe",
         "hist_audio": "🎤 Audiodatei, Transkript: {transcript}",
         "hist_caption": " (Beschriftung: {text})",
+        "hist_cut": " […gekürzt: insgesamt {total} Zeichen; read_history liefert den vollen Text]",
         "hist_file": "Datei",
         "hist_photo": "📷 Foto: {path}",
         "hist_photo_failed": "📷 Foto (konnte nicht geladen werden)",
@@ -461,6 +462,7 @@ _LOCALES = {
         "group_word": "group",
         "hist_audio": "🎤 Audio file, transcript: {transcript}",
         "hist_caption": " (caption: {text})",
+        "hist_cut": " […cut: {total} chars in total; read_history returns the full text]",
         "hist_file": "file",
         "hist_photo": "📷 Photo: {path}",
         "hist_photo_failed": "📷 Photo (could not be downloaded)",
@@ -778,6 +780,7 @@ _LOCALES = {
         "group_word": "топ",
         "hist_audio": "🎤 Аудиофайл, мәтіні: {transcript}",
         "hist_caption": " (сипаттама: {text})",
+        "hist_cut": " […қысқартылды: барлығы {total} таңба; толық мәтінді read_history береді]",
         "hist_file": "файл",
         "hist_photo": "📷 Фото: {path}",
         "hist_photo_failed": "📷 Фото (жүктеп алу мүмкін болмады)",
@@ -1095,6 +1098,7 @@ _LOCALES = {
         "group_word": "группа",
         "hist_audio": "🎤 Аудиофайл, расшифровка: {transcript}",
         "hist_caption": " (подпись: {text})",
+        "hist_cut": " […обрезано: всего {total} симв.; полный текст отдаёт read_history]",
         "hist_file": "файл",
         "hist_photo": "📷 Фото: {path}",
         "hist_photo_failed": "📷 Фото (не удалось загрузить)",
@@ -1412,6 +1416,7 @@ _LOCALES = {
         "group_word": "група",
         "hist_audio": "🎤 Аудіофайл, розшифровка: {transcript}",
         "hist_caption": " (підпис: {text})",
+        "hist_cut": " […обрізано: усього {total} симв.; повний текст віддає read_history]",
         "hist_file": "файл",
         "hist_photo": "📷 Фото: {path}",
         "hist_photo_failed": "📷 Фото (не вдалося завантажити)",
@@ -3198,17 +3203,17 @@ class CodexAsk(loader.Module):
             for (message_id, _), value in zip(tasks, values)
         }
 
-    async def _format_messages(self, msgs, name_cache=None, char_limit=300):
+    async def _format_messages(self, msgs, name_cache=None, char_limit=1000):
         """msgs must already be chronological (oldest first). Shared by the
         full-history fetch, the rolling delta and the reply-anchored range
         read -- all three just differ in HOW they pick which messages to
         fetch, not in how a message becomes one line of text.
 
-        char_limit stays small (300) by default -- that's tuned for the
+        char_limit stays moderate (1000) by default -- that's tuned for the
         rolling/casual "what's going on in the chat" context, where each
         line is just a light preview. Callers that resolve an EXPLICIT
         "read N messages in full" request (READ_HISTORY, directional
-        after/before) pass a much higher limit -- 300 chars was silently
+        after/before) pass a much higher limit -- a short preview silently
         truncating real content (e.g. a long forwarded document/reminder
         text) down to just its first line, which is exactly backwards for
         a call whose entire point is reading specific messages in full."""
@@ -3318,7 +3323,7 @@ class CodexAsk(loader.Module):
                 elif getattr(m, "action", None):
                     txt = pfx + f"⚡ {m.action.__class__.__name__}"
                 elif txt.strip():
-                    txt = pfx + txt[:char_limit] + ("..." if len(txt) > char_limit else "")
+                    txt = pfx + txt[:char_limit] + (_t("hist_cut", total=len(txt)) if len(txt) > char_limit else "")
                 else:
                     txt = pfx + "..."
                 lines.append(txt)
@@ -3326,7 +3331,7 @@ class CodexAsk(loader.Module):
                 lines.append(_t("hist_unparsed"))
         return "\n".join(lines)
 
-    async def _get_chat_history(self, message, limit=15, char_limit=300, exclude_id=None):
+    async def _get_chat_history(self, message, limit=15, char_limit=1000, exclude_id=None):
         topic_id = self._topic_of(message)
         try:
             kwargs = {"reply_to": topic_id} if topic_id else {}
@@ -5058,7 +5063,7 @@ class CodexAsk(loader.Module):
         attachment_part = f"\n{attachment_note}" if attachment_note else ""
         question = (
             _t("reply_agent_prompt", label=trig.get("label", trig["kind"]), chat=chat_label, sender=sender,
-               text=(message.raw_text or "")[:500], attachment=attachment_part)
+               text=(message.raw_text or ""), attachment=attachment_part)
         )
         origin_chat = str(trig.get("registration_chat_id") or "").strip()
         # Explicit session override, same rule as _fire_agent_action: "here"
@@ -5282,7 +5287,7 @@ class CodexAsk(loader.Module):
         prompt = (
             _t("agent_trigger_prompt", label=trig.get("label") or trig.get("kind"), chat=chat_label,
                chat_id=message.chat_id, message_id=message.id, sender=sender,
-               text=(message.raw_text or "")[:500], attachment=attachment_part, urls=url_note,
+               text=(message.raw_text or ""), attachment=attachment_part, urls=url_note,
                instruction=instruction)
         )
         if origin_chat and origin_chat != str(message.chat_id):
