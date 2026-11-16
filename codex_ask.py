@@ -1,4 +1,4 @@
-# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 b17f43a83cda);
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 474dc1575894);
 # change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
 #
@@ -43,7 +43,7 @@ from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotP
 from .. import loader, utils
 from .._internal import fw_protect
 
-__version__ = (2, 2, 2)
+__version__ = (2, 2, 3)
 
 # Interface language. Every user-visible string (and the text this module
 # hands to the model) lives in telegram-ai-core module/locales/<lang>.json;
@@ -4507,7 +4507,7 @@ class CodexAsk(loader.Module):
             report_to = str(spec.get("report_to") or "notify").strip().lower()
             if report_to not in ("origin", "notify"):
                 return None, _t("trig_bad_report_to")
-        elif "report_to" in spec:
+        elif spec.get("report_to") is not None:
             return None, _t("trig_report_to_agent_only")
         session = None
         if action in ("agent", "reply"):
@@ -4520,7 +4520,7 @@ class CodexAsk(loader.Module):
                 session = str(raw_session).strip().lower()
                 if session not in ("origin", "here"):
                     return None, _t("trig_bad_session")
-        elif "session" in spec:
+        elif spec.get("session") is not None:
             return None, _t("trig_session_agent_only")
         if action == "post" and not spec.get("target"):
             return None, _t("trig_post_needs_target")
