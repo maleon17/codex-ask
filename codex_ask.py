@@ -1,4 +1,4 @@
-# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 474dc1575894);
+# GENERATED FILE -- do not edit. Built from telegram-ai-core module/ask_module.py.tmpl and module/locales (sha256 b4dca744adcf);
 # change the template there and run module/build.py.
 # CodexAsk — .xask .xsearch .xtranslate + Jarvis persona, Codex backend
 #
@@ -43,7 +43,7 @@ from herokutl.errors import FloodWaitError, UserPrivacyRestrictedError, UserNotP
 from .. import loader, utils
 from .._internal import fw_protect
 
-__version__ = (2, 2, 3)
+__version__ = (2, 3, 0)
 
 # Interface language. Every user-visible string (and the text this module
 # hands to the model) lives in telegram-ai-core module/locales/<lang>.json;
@@ -108,6 +108,11 @@ _LOCALES = {
         "contact_action_failed": "Konnte die Aktion für „{name}“ nicht ausführen: {error}",
         "contact_added": "Zu den Kontakten hinzugefügt",
         "contact_removed": "Aus den Kontakten entfernt",
+        "create_file_bad_content": "❌ Der Dateiinhalt muss Text sein.",
+        "create_file_bad_name": "❌ Der Dateiname ist leer oder ungültig: gib einen einfachen Namen wie report.md an.",
+        "create_file_failed": "❌ Die Datei {name} konnte nicht erstellt werden.",
+        "create_file_ok": "✅ Datei {name} erstellt: {path}. Sende sie mit send_file über diesen Pfad.",
+        "create_file_too_big": "❌ Die Datei ist zu groß: höchstens {limit} KB.",
         "ctx_history": "Chatverlauf",
         "ctx_new_since_ask": "Neue Nachrichten seit dem letzten Mal",
         "ctx_new_since_trigger": "Neue Nachrichten seit dem letzten Auslösen",
@@ -427,6 +432,11 @@ _LOCALES = {
         "contact_action_failed": "Could not perform the action on \"{name}\": {error}",
         "contact_added": "Added to contacts",
         "contact_removed": "Removed from contacts",
+        "create_file_bad_content": "❌ The file content must be text.",
+        "create_file_bad_name": "❌ The file name is empty or invalid: give a plain name such as report.md.",
+        "create_file_failed": "❌ Could not create the file {name}.",
+        "create_file_ok": "✅ File {name} created: {path}. Send it with send_file using this path.",
+        "create_file_too_big": "❌ The file is too large: at most {limit} KB.",
         "ctx_history": "Chat history",
         "ctx_new_since_ask": "New messages since last time",
         "ctx_new_since_trigger": "New messages since the last firing",
@@ -746,6 +756,11 @@ _LOCALES = {
         "contact_action_failed": "«{name}» бойынша әрекетті орындай алмадым: {error}",
         "contact_added": "Контактқа қостым",
         "contact_removed": "Контакттардан жойдым",
+        "create_file_bad_content": "❌ Файл мазмұны мәтін болуы керек.",
+        "create_file_bad_name": "❌ Файл атауы бос немесе дұрыс емес: report.md сияқты қарапайым атау көрсет.",
+        "create_file_failed": "❌ {name} файлын жасау мүмкін болмады.",
+        "create_file_ok": "✅ {name} файлы жасалды: {path}. Оны осы жолмен send_file арқылы жібер.",
+        "create_file_too_big": "❌ Файл тым үлкен: {limit} КБ-тан аспауы керек.",
         "ctx_history": "Чат тарихы",
         "ctx_new_since_ask": "Өткен реттен бергі жаңа хабарламалар",
         "ctx_new_since_trigger": "Соңғы іске қосылудан бергі жаңа хабарламалар",
@@ -1065,6 +1080,11 @@ _LOCALES = {
         "contact_action_failed": "Не смог выполнить действие с «{name}»: {error}",
         "contact_added": "Добавил в контакты",
         "contact_removed": "Удалил из контактов",
+        "create_file_bad_content": "❌ Содержимое файла должно быть текстом.",
+        "create_file_bad_name": "❌ Имя файла пустое или некорректное: укажи простое имя, например report.md.",
+        "create_file_failed": "❌ Не удалось создать файл {name}.",
+        "create_file_ok": "✅ Файл {name} создан: {path}. Отправь его через send_file с этим путём.",
+        "create_file_too_big": "❌ Файл слишком большой: не больше {limit} КБ.",
         "ctx_history": "История чата",
         "ctx_new_since_ask": "Новые сообщения с прошлого раза",
         "ctx_new_since_trigger": "Новые сообщения с прошлого срабатывания",
@@ -1384,6 +1404,11 @@ _LOCALES = {
         "contact_action_failed": "Не зміг виконати дію з «{name}»: {error}",
         "contact_added": "Додав у контакти",
         "contact_removed": "Видалив із контактів",
+        "create_file_bad_content": "❌ Вміст файлу має бути текстом.",
+        "create_file_bad_name": "❌ Ім'я файлу порожнє або некоректне: вкажи просте ім'я, наприклад report.md.",
+        "create_file_failed": "❌ Не вдалося створити файл {name}.",
+        "create_file_ok": "✅ Файл {name} створено: {path}. Надішли його через send_file з цим шляхом.",
+        "create_file_too_big": "❌ Файл завеликий: не більше {limit} КБ.",
         "ctx_history": "Історія чату",
         "ctx_new_since_ask": "Нові повідомлення з минулого разу",
         "ctx_new_since_trigger": "Нові повідомлення з минулого спрацювання",
@@ -1954,6 +1979,7 @@ PUBLIC_TOOLS = frozenset({
     "resolve_person", "list_chat_members", "list_triggers",
     "search_chat", "read_history",
 })
+CREATE_FILE_MAX_BYTES = 2 * 1024 * 1024
 TRIGGER_REQUESTER_PREFIX = "trigger:"
 TRIGGER_DEFAULT_ALLOWED_TOOLS = frozenset({"send_message"})
 HISTORY_TOOLS = frozenset({"search_chat", "read_history"})
@@ -3692,6 +3718,24 @@ class CodexAsk(loader.Module):
     # MCP tools alongside SEARCH_CHAT/READ_HISTORY/LIST_TRIGGERS/CREATE_GROUP/
     # INVITE_TO_GROUP/RESOLVE_PERSON above, same 2026-08-11 pass. Nothing in
     # this file parses `[MARKER:...]` syntax out of a model answer anymore.
+
+    async def _create_file_action(self, filename, content):
+        """Real create_file MCP tool handler: stores a text file on the relay
+        host through /upload (which also registers it for send_file) and
+        returns its path."""
+        name = os.path.basename(str(filename or "").replace("\\", "/"))
+        name = re.sub(r'[\x00-\x1f"]', "_", name).strip().lstrip(".")[:120]
+        if not name:
+            return _t("create_file_bad_name")
+        if not isinstance(content, str):
+            return _t("create_file_bad_content")
+        data = content.encode("utf-8")
+        if len(data) > CREATE_FILE_MAX_BYTES:
+            return _t("create_file_too_big", limit=CREATE_FILE_MAX_BYTES // 1024)
+        path = await self._upload_to_lightrag(data, name)
+        if not path:
+            return _t("create_file_failed", name=name)
+        return _t("create_file_ok", name=name, path=path)
 
     async def _send_file_action(self, path, target, chat_id):
         """Real send_file MCP tool handler (was the SEND_FILE text marker,
@@ -5954,6 +5998,8 @@ class CodexAsk(loader.Module):
             elif tool == "send_message_as_bot":
                 result = await self._send_message_action(args.get("target", ""), args.get("text", ""), as_bot=True)
                 self._mark_sent_message(chat_id, result)
+            elif tool == "create_file":
+                result = await self._create_file_action(args.get("filename", ""), args.get("content", ""))
             elif tool == "send_file":
                 result = await self._send_file_action(args.get("path", ""), args.get("target", ""), chat_id)
             elif tool in ("add_contact", "remove_contact", "block_user", "unblock_user"):
