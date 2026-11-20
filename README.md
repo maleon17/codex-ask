@@ -39,12 +39,12 @@ It runs on your ChatGPT/Codex subscription through the official Codex CLI, with 
 **1. Install the backend:**
 
 ```bash
-git clone https://github.com/maleon17/codex-ask.git
-cd codex-ask
+git clone https://github.com/maleon17/codex-ask.git ~/.codex-ask
+cd ~/.codex-ask
 ./setup.sh
 ```
 
-The installer fetches the shared [telegram-ai-core](https://github.com/maleon17/telegram-ai-core) next to this folder (or reuses the relay ClaudeAsk already installed), starts the Codex worker as a service, and asks for:
+The installer fetches the shared [telegram-ai-core](https://github.com/maleon17/telegram-ai-core) into a hidden folder next to this one (`~/.telegram-ai-core`, or reuses the relay ClaudeAsk already installed), starts the Codex worker as a service, and asks for:
 
 - your name and Telegram ID (for the persona — get the ID from [@userinfobot](https://t.me/userinfobot));
 - an **instance ID** — any short name for your userbot, like `mybot` (use the same one as for ClaudeAsk if both live in one userbot).

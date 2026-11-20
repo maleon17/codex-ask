@@ -72,7 +72,7 @@ echo "Codex account: authenticated"
 # --- telegram-ai-core: relay, Telegram-action MCP server, userbot module -----
 CORE_REPO_URL="${TELEGRAM_AI_CORE_REPO:-https://github.com/maleon17/telegram-ai-core.git}"
 CORE_DIR=""
-for candidate in "${TELEGRAM_AI_CORE_DIR:-}" "$(registered_core)" "$ROOT/../telegram-ai-core" "$HOME/telegram-ai-core"; do
+for candidate in "${TELEGRAM_AI_CORE_DIR:-}" "$(registered_core)" "$ROOT/../.telegram-ai-core" "$HOME/.telegram-ai-core" "$ROOT/../telegram-ai-core" "$HOME/telegram-ai-core"; do
     if [[ -n "$candidate" && -f "$candidate/install_relay.sh" && -f "$candidate/telegram_actions_mcp.py" ]]; then
         CORE_DIR="$(cd "$candidate" && pwd)"
         break
@@ -80,7 +80,7 @@ for candidate in "${TELEGRAM_AI_CORE_DIR:-}" "$(registered_core)" "$ROOT/../tele
 done
 if [[ -z "$CORE_DIR" ]]; then
     need git
-    CORE_DIR="$(dirname "$ROOT")/telegram-ai-core"
+    CORE_DIR="$(dirname "$ROOT")/.telegram-ai-core"
     echo "Fetching telegram-ai-core into $CORE_DIR"
     git clone --quiet --depth 1 "$CORE_REPO_URL" "$CORE_DIR" \
         || die "could not clone $CORE_REPO_URL (set TELEGRAM_AI_CORE_DIR to an existing checkout)"
